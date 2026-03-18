@@ -1,0 +1,23 @@
+# Video and Audio inputs/outputs
+*.mp4
+*.webm
+*.avi
+*.mov
+*.mkv
+*.flac
+*.mp3
+*.wav
+*.m4a
+
+# Temp files
+temp_*.avi
+
+# Directories
+archive/
+__pycache__/
+
+# System files
+.DS_Store
+.env
+
+glitch_sync.py.old
