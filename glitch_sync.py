@@ -660,10 +660,19 @@ class GlitchGUI:
         self.style_combo = None
         self.styles = self.load_styles_file()
         self.last_progress_val = 0
+        self.build_menu()
         self.build_ui()
         self.refresh_style_choices()
         if "_last" in self.styles:
             self.apply_settings(self.styles["_last"])
+
+    def build_menu(self):
+        menubar = tk.Menu(self.root)
+        file_menu = tk.Menu(menubar, tearoff=0)
+        file_menu.add_command(label="Save Project...", command=self.save_project)
+        file_menu.add_command(label="Load Project...", command=self.load_project)
+        menubar.add_cascade(label="File", menu=file_menu)
+        self.root.config(menu=menubar)
 
     def build_ui(self):
         m = ttk.Frame(self.root, padding="15"); m.pack(fill=tk.BOTH, expand=True)
@@ -680,17 +689,15 @@ class GlitchGUI:
         ttk.Combobox(io, textvariable=self.export_mode_label, values=list(EXPORT_MODE_LABELS.keys()), state="readonly").grid(row=2, column=1, sticky="ew")
         ttk.Label(io, text="Out:").grid(row=3, column=0)
         ttk.Entry(io, textvariable=self.output).grid(row=3, column=1, sticky="ew")
-        ttk.Button(io, text="Save Project", command=self.save_project).grid(row=4, column=1, sticky="w", pady=5)
-        ttk.Button(io, text="Load Project", command=self.load_project).grid(row=4, column=2, sticky="w", pady=5)
-        ttk.Label(io, text="Render length:").grid(row=5, column=0, sticky="w")
-        ttk.Combobox(io, textvariable=self.render_mode, values=["Full", "Snippet"], state="readonly", width=10).grid(row=5, column=1, sticky="w", pady=5)
-        ttk.Spinbox(io, from_=1, to=3600, textvariable=self.snippet_duration, width=7).grid(row=5, column=2, sticky="w")
-        ttk.Checkbutton(io, text="Primary focus", variable=self.primary_enabled).grid(row=6, column=0, sticky="w")
-        ttk.Button(io, text="Set Selected", command=self.set_primary_video).grid(row=6, column=1, sticky="w", pady=5)
-        ttk.Label(io, textvariable=self.primary_video_label).grid(row=6, column=2, sticky="w")
-        ttk.Label(io, text="Focus:").grid(row=7, column=0, sticky="w")
-        ttk.Scale(io, from_=0.0, to=1.0, variable=self.primary_focus, command=lambda e: self.update_primary_focus_label()).grid(row=7, column=1, sticky="ew")
-        self.primary_focus_label = ttk.Label(io, text="0.75"); self.primary_focus_label.grid(row=7, column=2, sticky="w")
+        ttk.Label(io, text="Render length:").grid(row=4, column=0, sticky="w")
+        ttk.Combobox(io, textvariable=self.render_mode, values=["Full", "Snippet"], state="readonly", width=10).grid(row=4, column=1, sticky="w", pady=5)
+        ttk.Spinbox(io, from_=1, to=3600, textvariable=self.snippet_duration, width=7).grid(row=4, column=2, sticky="w")
+        ttk.Checkbutton(io, text="Primary focus", variable=self.primary_enabled).grid(row=5, column=0, sticky="w")
+        ttk.Button(io, text="Set Selected", command=self.set_primary_video).grid(row=5, column=1, sticky="w", pady=5)
+        ttk.Label(io, textvariable=self.primary_video_label).grid(row=5, column=2, sticky="w")
+        ttk.Label(io, text="Focus:").grid(row=6, column=0, sticky="w")
+        ttk.Scale(io, from_=0.0, to=1.0, variable=self.primary_focus, command=lambda e: self.update_primary_focus_label()).grid(row=6, column=1, sticky="ew")
+        self.primary_focus_label = ttk.Label(io, text="0.75"); self.primary_focus_label.grid(row=6, column=2, sticky="w")
 
         pv = ttk.LabelFrame(m, text="Live Preview & Review", padding="10"); pv.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
         self.cv = tk.Canvas(pv, width=480, height=270, bg="black"); self.cv.pack(pady=5)
