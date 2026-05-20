@@ -861,8 +861,11 @@ class GlitchGUI:
         
         io = ttk.LabelFrame(m, text="Files", padding="10"); io.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
         ttk.Label(io, text="Inputs:").grid(row=0, column=0, sticky="nw")
-        self.lb = tk.Listbox(io, height=5); self.lb.grid(row=0, column=1, sticky="ew", padx=5)
-        ttk.Button(io, text="+ Add", command=self.add_v).grid(row=0, column=2, sticky="n")
+        self.lb = tk.Listbox(io, height=5, selectmode=tk.EXTENDED); self.lb.grid(row=0, column=1, sticky="ew", padx=5)
+        input_buttons = ttk.Frame(io); input_buttons.grid(row=0, column=2, sticky="n")
+        ttk.Button(input_buttons, text="+ Add", command=self.add_v).pack(fill=tk.X)
+        ttk.Button(input_buttons, text="Remove", command=self.remove_selected_inputs).pack(fill=tk.X, pady=(5, 0))
+        ttk.Button(input_buttons, text="Clean Missing", command=self.clean_missing_inputs).pack(fill=tk.X, pady=(5, 0))
         ttk.Label(io, text="Audio:").grid(row=1, column=0, pady=5)
         ttk.Entry(io, textvariable=self.audio).grid(row=1, column=1, sticky="ew")
         ttk.Button(io, text="...", command=self.add_a).grid(row=1, column=2)
@@ -1059,18 +1062,10 @@ class GlitchGUI:
     def apply_project(self, project):
         if not isinstance(project, dict):
             raise ValueError("Invalid project file")
-        self.inputs = list(project.get("inputs", []))
-        self.lb.delete(0, tk.END)
-        for path in self.inputs:
-            self.lb.insert(tk.END, os.path.basename(path))
+        self.set_inputs(list(project.get("inputs", [])), int(project.get("primary_video_idx", 0) or 0))
         self.audio.set(project.get("audio", ""))
         self.output.set(project.get("output", self.output.get()))
-        self.primary_video_idx = int(project.get("primary_video_idx", 0) or 0)
-        if self.inputs and not (0 <= self.primary_video_idx < len(self.inputs)):
-            self.primary_video_idx = 0
-        if self.inputs:
-            self.primary_video_label.set(f"Primary: {os.path.basename(self.inputs[self.primary_video_idx])}")
-        else:
+        if not self.inputs:
             self.primary_video_label.set(project.get("primary_video_label", "Primary: first input"))
         self.style_name.set(project.get("style_name", self.style_name.get()))
         if project.get("style_choice"):
@@ -1199,6 +1194,19 @@ class GlitchGUI:
             self.save_styles_file()
         except Exception as e:
             self.log_msg(f"Could not save last-used settings: {e}")
+    def set_inputs(self, inputs, primary_idx=None):
+        self.inputs = list(inputs)
+        self.lb.delete(0, tk.END)
+        for path in self.inputs:
+            self.lb.insert(tk.END, os.path.basename(path))
+        if not self.inputs:
+            self.primary_video_idx = 0
+            self.primary_video_label.set("Primary: first input")
+            return
+        if primary_idx is None:
+            primary_idx = self.primary_video_idx
+        self.primary_video_idx = int(np.clip(primary_idx, 0, len(self.inputs) - 1))
+        self.primary_video_label.set(f"Primary: {os.path.basename(self.inputs[self.primary_video_idx])}")
     def add_v(self):
         f = filedialog.askopenfilenames(filetypes=[("Video", "*.mp4 *.avi *.mov *.mkv *.webm")])
         for x in f:
@@ -1207,6 +1215,24 @@ class GlitchGUI:
                 if len(self.inputs) == 1:
                     self.primary_video_idx = 0
                     self.primary_video_label.set(f"Primary: {os.path.basename(x)}")
+    def remove_selected_inputs(self):
+        selected = set(self.lb.curselection())
+        if not selected:
+            return messagebox.showinfo("Remove Inputs", "Select one or more input videos to remove.")
+        new_inputs = [path for idx, path in enumerate(self.inputs) if idx not in selected]
+        new_primary = self.primary_video_idx - sum(1 for idx in selected if idx < self.primary_video_idx)
+        self.set_inputs(new_inputs, new_primary)
+    def clean_missing_inputs(self):
+        missing = [path for path in self.inputs if not os.path.exists(path)]
+        if not missing:
+            return messagebox.showinfo("Clean Missing Inputs", "All selected input files still exist.")
+        if not messagebox.askyesno("Clean Missing Inputs", f"Remove {len(missing)} missing input file(s) from this project?"):
+            return
+        existing = [path for path in self.inputs if os.path.exists(path)]
+        primary_path = self.inputs[self.primary_video_idx] if self.inputs and 0 <= self.primary_video_idx < len(self.inputs) else None
+        new_primary = existing.index(primary_path) if primary_path in existing else 0
+        self.set_inputs(existing, new_primary)
+        self.log_msg(f"Removed {len(missing)} missing input file(s).")
     def add_a(self):
         f = filedialog.askopenfilename(filetypes=[("Audio", "*.mp3 *.wav *.flac *.m4a")])
         if f: self.audio.set(f)
