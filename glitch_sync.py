@@ -35,9 +35,10 @@ EFFECT_NAMES = ("pixelate", "flash", "rewind", "rgb_shift", "shake", "ghosting",
 DEFAULT_EFFECT_AMOUNTS = {name: 1.0 for name in EFFECT_NAMES}
 DEFAULT_STYLE_NAME = "Default"
 STYLE_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".glitchsync_styles.json")
-ANALYSIS_CACHE_VERSION = "3"
+ANALYSIS_CACHE_VERSION = "4"
 ANALYSIS_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "glitchsync", "analysis")
 STATIC_MOTION_THRESHOLD = 0.018
+LAB_EPSILON = 1e-6
 
 
 def file_cache_key(path, kind):
@@ -57,16 +58,71 @@ def analysis_cache_path(path, kind, extension):
     return os.path.join(ANALYSIS_CACHE_DIR, kind, f"{file_cache_key(path, kind)}.{extension}")
 
 
+def load_cube_lut(path):
+    size = None
+    values = []
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            upper = line.upper()
+            if upper.startswith("TITLE") or upper.startswith("DOMAIN_"):
+                continue
+            if upper.startswith("LUT_3D_SIZE"):
+                parts = line.split()
+                if len(parts) >= 2:
+                    size = int(parts[1])
+                continue
+            parts = line.split()
+            if len(parts) >= 3:
+                try:
+                    values.append([float(parts[0]), float(parts[1]), float(parts[2])])
+                except ValueError:
+                    continue
+    if not size or len(values) < size ** 3:
+        raise ValueError("Unsupported or incomplete .cube LUT")
+    return np.array(values[:size ** 3], dtype=np.float32).reshape((size, size, size, 3))
+
+
+def apply_cube_lut(frame, lut):
+    if lut is None:
+        return frame
+    size = lut.shape[0]
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    idx = np.clip(np.rint(rgb * (size - 1)).astype(np.int32), 0, size - 1)
+    graded = lut[idx[:, :, 0], idx[:, :, 1], idx[:, :, 2]]
+    graded = np.clip(graded * 255.0, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(graded, cv2.COLOR_RGB2BGR)
+
+
+def match_lab_color(frame, source_stats, reference_stats, strength):
+    if not source_stats or not reference_stats or strength <= 0:
+        return frame
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB).astype(np.float32)
+    src_mean = np.array(source_stats["lab_mean"], dtype=np.float32)
+    src_std = np.array(source_stats["lab_std"], dtype=np.float32)
+    ref_mean = np.array(reference_stats["lab_mean"], dtype=np.float32)
+    ref_std = np.array(reference_stats["lab_std"], dtype=np.float32)
+    matched = ((lab - src_mean) * (ref_std / np.maximum(src_std, LAB_EPSILON))) + ref_mean
+    blended = lab + ((matched - lab) * np.clip(strength, 0, 1))
+    return cv2.cvtColor(np.clip(blended, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
+
+
 def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=True,
                beat_step=1, beat_variation=0.0, effects_enabled=None,
                effect_amounts=None, primary_enabled=False, primary_focus=0.75,
-               export_mode_label="Final video (MP4)"):
+               export_mode_label="Final video (MP4)", source_variety=0.0,
+               color_match_enabled=False, color_match_strength=0.0):
     return {
         "export_mode_label": export_mode_label,
         "duration": duration,
         "fps": fps,
         "coherence": coherence,
         "sensitivity": sensitivity,
+        "source_variety": source_variety,
+        "color_match_enabled": color_match_enabled,
+        "color_match_strength": color_match_strength,
         "beat_sync": beat_sync,
         "beat_step": beat_step,
         "beat_variation": beat_variation,
@@ -373,7 +429,9 @@ class GlitchProcessor:
                  export_mode=EXPORT_FINAL_VIDEO,
                  progress_callback=None, log_callback=None, frame_callback=None,
                  effect_amounts=None, primary_video_idx=None, primary_focus=0.0,
-                 beat_step=1, beat_variation=0.0, render_limit=None):
+                 beat_step=1, beat_variation=0.0, render_limit=None,
+                 source_variety=0.0, color_reference_idx=None, color_match_strength=0.0,
+                 lut_path=""):
         self.inputs, self.audio, self.output = inputs, audio, output
         self.duration, self.fps = duration, fps
         self.pixelate, self.flash, self.rewind = pixelate, flash, rewind
@@ -384,6 +442,11 @@ class GlitchProcessor:
         self.beat_step = max(1, int(beat_step))
         self.beat_variation = np.clip(float(beat_variation), 0, 1)
         self.render_limit = float(render_limit) if render_limit else None
+        self.source_variety = np.clip(float(source_variety), 0, 1)
+        self.color_reference_idx = color_reference_idx if color_reference_idx is not None else None
+        self.color_match_strength = np.clip(float(color_match_strength), 0, 1)
+        self.lut_path = lut_path
+        self.lut = None
         self.effect_amounts = DEFAULT_EFFECT_AMOUNTS.copy()
         if effect_amounts:
             for name in EFFECT_NAMES:
@@ -400,6 +463,18 @@ class GlitchProcessor:
 
     def effect_amount(self, name):
         return self.effect_amounts.get(name, 1.0)
+
+    def choose_candidate(self, candidates, source_use_counts=None):
+        if not candidates:
+            return None
+        if not source_use_counts or self.source_variety <= 0:
+            return random.choice(candidates)
+        max_count = max(source_use_counts) if source_use_counts else 0
+        weights = [
+            ((max_count + 1) / (source_use_counts[v_idx] + 1)) ** (1 + (self.source_variety * 4))
+            for v_idx, _ in candidates
+        ]
+        return random.choices(candidates, weights=weights, k=1)[0]
 
     def use_primary_video(self):
         return (
@@ -430,7 +505,12 @@ class GlitchProcessor:
             try:
                 with open(cache_path, "rb") as f:
                     cached = pickle.load(f)
-                if isinstance(cached, dict) and isinstance(cached.get("buckets"), list) and len(cached["buckets"]) == 256:
+                if (
+                    isinstance(cached, dict)
+                    and isinstance(cached.get("buckets"), list)
+                    and len(cached["buckets"]) == 256
+                    and "color_stats" in cached
+                ):
                     self.log(f"  Using cached index for {os.path.basename(path)}")
                     return cached
             except Exception as e:
@@ -439,6 +519,9 @@ class GlitchProcessor:
         self.log(f"  Scanning {os.path.basename(path)}...")
         buckets = [[] for _ in range(256)]
         motion_scores = []
+        lab_sum = np.zeros(3, dtype=np.float64)
+        lab_sq_sum = np.zeros(3, dtype=np.float64)
+        lab_pixels = 0
         cap = cv2.VideoCapture(path)
         frame_count = 0
         prev_sample = None
@@ -456,9 +539,26 @@ class GlitchProcessor:
                 motion = 0.0 if prev_sample is None else float(np.mean(cv2.absdiff(sample, prev_sample)) / 255.0)
                 motion_scores.append((frame_count, motion))
                 prev_sample = sample
+                lab_sample = cv2.cvtColor(cv2.resize(frame, (160, 90), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2LAB).astype(np.float32)
+                lab_sum += np.sum(lab_sample, axis=(0, 1))
+                lab_sq_sum += np.sum(lab_sample ** 2, axis=(0, 1))
+                lab_pixels += lab_sample.shape[0] * lab_sample.shape[1]
             frame_count += 1
         cap.release()
-        video_analysis = {"buckets": buckets, "motion_scores": motion_scores}
+        if lab_pixels:
+            lab_mean = lab_sum / lab_pixels
+            lab_std = np.sqrt(np.maximum((lab_sq_sum / lab_pixels) - (lab_mean ** 2), LAB_EPSILON))
+        else:
+            lab_mean = np.array([128.0, 128.0, 128.0])
+            lab_std = np.array([1.0, 1.0, 1.0])
+        video_analysis = {
+            "buckets": buckets,
+            "motion_scores": motion_scores,
+            "color_stats": {
+                "lab_mean": lab_mean.tolist(),
+                "lab_std": lab_std.tolist(),
+            },
+        }
 
         if not self.stop_requested:
             try:
@@ -475,6 +575,7 @@ class GlitchProcessor:
         if self.progress_callback: self.progress_callback(-1, -1)
         frame_db = {i: [] for i in range(256)}
         motion_db = {}
+        color_stats = {}
         for video_idx, path in enumerate(self.inputs):
             video_analysis = self.analyze_video_file(path)
             buckets = video_analysis["buckets"]
@@ -483,9 +584,10 @@ class GlitchProcessor:
                 [frame for frame, _ in motion_scores],
                 [score for _, score in motion_scores],
             )
+            color_stats[video_idx] = video_analysis.get("color_stats")
             for brightness, frames in enumerate(buckets):
                 frame_db[brightness].extend((video_idx, frame_idx) for frame_idx in frames)
-        return frame_db, motion_db
+        return frame_db, motion_db, color_stats
 
     def analyze_audio_file(self):
         cache_path = analysis_cache_path(self.audio, "audio", "npz")
@@ -546,7 +648,7 @@ class GlitchProcessor:
             "tempo": tempo_val,
         }
 
-    def find_best_match(self, target_b, frame_db, current_vid_idx):
+    def find_best_match(self, target_b, frame_db, current_vid_idx, source_use_counts=None):
         search_range = 8
         candidates_current, candidates_other, candidates_primary = [], [], []
         for b in range(max(0, target_b - search_range), min(255, target_b + search_range) + 1):
@@ -556,10 +658,10 @@ class GlitchProcessor:
                 if v_idx == current_vid_idx: candidates_current.append((v_idx, f_idx))
                 else: candidates_other.append((v_idx, f_idx))
         if candidates_primary and random.random() < self.primary_focus:
-            return random.choice(candidates_primary)
+            return self.choose_candidate(candidates_primary, source_use_counts)
         if candidates_current and (random.random() < self.coherence or not candidates_other):
-            return random.choice(candidates_current)
-        if candidates_other: return random.choice(candidates_other)
+            return self.choose_candidate(candidates_current, source_use_counts)
+        if candidates_other: return self.choose_candidate(candidates_other, source_use_counts)
         offset = 1
         while offset < 256:
             low, high = target_b - offset, target_b + offset
@@ -570,8 +672,8 @@ class GlitchProcessor:
             if self.use_primary_video():
                 primary_fallback = [item for item in fallback if item[0] == self.primary_video_idx]
                 if primary_fallback and random.random() < self.primary_focus:
-                    return random.choice(primary_fallback)
-            if fallback: return random.choice(fallback)
+                    return self.choose_candidate(primary_fallback, source_use_counts)
+            if fallback: return self.choose_candidate(fallback, source_use_counts)
             offset += 1
         return None
 
@@ -588,11 +690,19 @@ class GlitchProcessor:
             return scores[nearest_pos]
         return float(np.mean(window))
 
+    def load_lut(self):
+        if not self.lut_path:
+            return
+        self.lut = load_cube_lut(self.lut_path)
+        self.log(f"Using LUT: {os.path.basename(self.lut_path)}")
+
     def process(self):
         package_dir = None
         clip_dir = None
-        frame_db, motion_db = self.analyze_source_videos()
+        frame_db, motion_db, color_stats = self.analyze_source_videos()
         if self.stop_requested: return
+        if self.lut_path:
+            self.load_lut()
         audio_features = self.analyze_audio_file()
         sr = audio_features["sr"]
         audio_duration = audio_features["duration"]
@@ -637,6 +747,8 @@ class GlitchProcessor:
         temp_video = f"temp_{random.randint(1000, 9999)}.avi"
         out = cv2.VideoWriter(temp_video, cv2.VideoWriter_fourcc(*'XVID'), self.fps, (width, height))
         caps, prev_f = [cv2.VideoCapture(f) for f in self.inputs], None
+        source_use_counts = [0 for _ in self.inputs]
+        reference_stats = color_stats.get(self.color_reference_idx) if self.color_reference_idx is not None else None
         segments = []
         rendered_frames = 0
         if self.export_mode == EXPORT_CLIP_MLT:
@@ -647,6 +759,10 @@ class GlitchProcessor:
         self.log("Rendering...")
         if self.use_primary_video():
             self.log(f"  Primary focus: {os.path.basename(self.inputs[self.primary_video_idx])} ({self.primary_focus:.2f})")
+        if self.source_variety > 0:
+            self.log(f"  Source variety: {self.source_variety:.2f}")
+        if reference_stats and self.color_match_strength > 0:
+            self.log(f"  Color reference: {os.path.basename(self.inputs[self.color_reference_idx])} ({self.color_match_strength:.2f})")
         for i in range(len(cut_times)):
             if self.stop_requested: break
             t_start = cut_times[i]
@@ -658,9 +774,10 @@ class GlitchProcessor:
             curr_highs = np.clip(float(get_val(highs_energy, t_start)) / max_highs, 0, 1)
             curr_mids = np.clip(float(get_val(mids_energy, t_start)) / max_mids, 0, 1)
             
-            match = self.find_best_match(int(curr_rms * 255), frame_db, self.current_vid_idx)
+            match = self.find_best_match(int(curr_rms * 255), frame_db, self.current_vid_idx, source_use_counts)
             if match:
                 self.current_vid_idx, start_frame = match
+                source_use_counts[self.current_vid_idx] += 1
                 caps[self.current_vid_idx].set(cv2.CAP_PROP_POS_FRAMES, start_frame)
                 chunk = []
                 for _ in range(num_frames):
@@ -690,6 +807,8 @@ class GlitchProcessor:
                     if use_static_pan_zoom:
                         progress = frame_idx / max(1, len(chunk) - 1)
                         f = apply_static_pan_zoom(f, progress, static_pan_zoom_amount, pan_x, pan_y)
+                    if reference_stats and self.color_match_strength > 0:
+                        f = match_lab_color(f, color_stats.get(self.current_vid_idx), reference_stats, self.color_match_strength)
                     if self.pixelate and pixelate_amount > 0:
                         f = apply_pixelate(f, curr_rms, curr_highs, self.sensitivity * pixelate_amount, pixelate_amount)
                     if self.flash and flash_amount > 0:
@@ -700,6 +819,8 @@ class GlitchProcessor:
                         f = apply_shake(f, curr_bass, self.sensitivity * shake_amount)
                     if self.ghosting and ghosting_amount > 0:
                         f = apply_ghosting(f, prev_f, curr_mids, self.sensitivity * ghosting_amount)
+                    if self.lut is not None:
+                        f = apply_cube_lut(f, self.lut)
                     out.write(f)
                     if self.export_mode == EXPORT_CLIP_MLT:
                         segment_frames.append(f)
@@ -800,12 +921,20 @@ class GlitchGUI:
         self.root = root
         self.current_project_path = None
         self.root.title("GlitchSync Pro v3.8")
-        self.root.geometry("1180x1120")
-        self.root.minsize(1100, 1050)
+        self.root.geometry("1180x1180")
+        self.root.minsize(1100, 1100)
         self.inputs, self.audio = [], tk.StringVar()
         self.output = tk.StringVar(value=f"glitch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
         self.export_mode_label = tk.StringVar(value="Final video (MP4)")
         self.duration, self.fps, self.coherence, self.sensitivity = tk.DoubleVar(value=0.10), tk.IntVar(value=30), tk.DoubleVar(value=0.20), tk.DoubleVar(value=1.0)
+        self.source_variety = tk.DoubleVar(value=0.0)
+        self.source_variety_label = None
+        self.color_match_enabled = tk.BooleanVar(value=False)
+        self.color_match_strength = tk.DoubleVar(value=0.0)
+        self.color_match_strength_label = None
+        self.color_reference_idx = 0
+        self.color_reference_label = tk.StringVar(value="Reference: first input")
+        self.lut_path = tk.StringVar()
         self.render_mode = tk.StringVar(value="Full")
         self.snippet_duration = tk.DoubleVar(value=30.0)
         self.beat_step = tk.IntVar(value=1)
@@ -882,6 +1011,15 @@ class GlitchGUI:
         ttk.Label(io, text="Focus:").grid(row=6, column=0, sticky="w")
         ttk.Scale(io, from_=0.0, to=1.0, variable=self.primary_focus, command=lambda e: self.update_primary_focus_label()).grid(row=6, column=1, sticky="ew")
         self.primary_focus_label = ttk.Label(io, text="0.75"); self.primary_focus_label.grid(row=6, column=2, sticky="w")
+        ttk.Checkbutton(io, text="Color match", variable=self.color_match_enabled).grid(row=7, column=0, sticky="w")
+        ttk.Button(io, text="Set Color Ref", command=self.set_color_reference_video).grid(row=7, column=1, sticky="w", pady=5)
+        ttk.Label(io, textvariable=self.color_reference_label).grid(row=7, column=2, sticky="w")
+        ttk.Label(io, text="Match:").grid(row=8, column=0, sticky="w")
+        ttk.Scale(io, from_=0.0, to=1.0, variable=self.color_match_strength, command=lambda e: self.update_color_match_strength_label()).grid(row=8, column=1, sticky="ew")
+        self.color_match_strength_label = ttk.Label(io, text="0.00"); self.color_match_strength_label.grid(row=8, column=2, sticky="w")
+        ttk.Label(io, text="LUT:").grid(row=9, column=0, sticky="w")
+        ttk.Entry(io, textvariable=self.lut_path).grid(row=9, column=1, sticky="ew")
+        ttk.Button(io, text="...", command=self.pick_lut).grid(row=9, column=2)
 
         pv = ttk.LabelFrame(m, text="Live Preview & Review", padding="10"); pv.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
         self.cv = tk.Canvas(pv, width=480, height=270, bg="black"); self.cv.pack(pady=5)
@@ -903,19 +1041,22 @@ class GlitchGUI:
         ttk.Label(set_f, text="Coherence:").grid(row=4, column=0)
         ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.coherence, command=lambda e: self.l_coh.config(text=f"{self.coherence.get():.2f}")).grid(row=4, column=1, sticky="ew")
         self.l_coh = ttk.Label(set_f, text="0.20"); self.l_coh.grid(row=4, column=2)
-        ttk.Label(set_f, text="Sensitivity:").grid(row=5, column=0)
-        ttk.Scale(set_f, from_=0.1, to=3.0, variable=self.sensitivity, command=lambda e: self.l_sen.config(text=f"{self.sensitivity.get():.2f}")).grid(row=5, column=1, sticky="ew")
-        self.l_sen = ttk.Label(set_f, text="1.00"); self.l_sen.grid(row=5, column=2)
-        ttk.Label(set_f, text="FPS:").grid(row=6, column=0)
-        ttk.Spinbox(set_f, from_=1, to=120, textvariable=self.fps, width=5).grid(row=6, column=1, sticky="w")
-        ttk.Label(set_f, text="Style name:").grid(row=7, column=0)
-        ttk.Entry(set_f, textvariable=self.style_name).grid(row=7, column=1, sticky="ew")
-        ttk.Button(set_f, text="Save Style", command=self.save_named_style).grid(row=7, column=2, sticky="ew")
-        ttk.Label(set_f, text="Load style:").grid(row=8, column=0)
+        ttk.Label(set_f, text="Source variety:").grid(row=5, column=0)
+        ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.source_variety, command=lambda e: self.update_source_variety_label()).grid(row=5, column=1, sticky="ew")
+        self.source_variety_label = ttk.Label(set_f, text="0.00"); self.source_variety_label.grid(row=5, column=2)
+        ttk.Label(set_f, text="Sensitivity:").grid(row=6, column=0)
+        ttk.Scale(set_f, from_=0.1, to=3.0, variable=self.sensitivity, command=lambda e: self.l_sen.config(text=f"{self.sensitivity.get():.2f}")).grid(row=6, column=1, sticky="ew")
+        self.l_sen = ttk.Label(set_f, text="1.00"); self.l_sen.grid(row=6, column=2)
+        ttk.Label(set_f, text="FPS:").grid(row=7, column=0)
+        ttk.Spinbox(set_f, from_=1, to=120, textvariable=self.fps, width=5).grid(row=7, column=1, sticky="w")
+        ttk.Label(set_f, text="Style name:").grid(row=8, column=0)
+        ttk.Entry(set_f, textvariable=self.style_name).grid(row=8, column=1, sticky="ew")
+        ttk.Button(set_f, text="Save Style", command=self.save_named_style).grid(row=8, column=2, sticky="ew")
+        ttk.Label(set_f, text="Load style:").grid(row=9, column=0)
         self.style_combo = ttk.Combobox(set_f, textvariable=self.style_choice, state="readonly")
-        self.style_combo.grid(row=8, column=1, sticky="ew")
-        ttk.Button(set_f, text="Load Style", command=self.load_named_style).grid(row=8, column=2, sticky="ew")
-        ttk.Button(set_f, text="Delete Style", command=self.delete_named_style).grid(row=9, column=2, sticky="ew")
+        self.style_combo.grid(row=9, column=1, sticky="ew")
+        ttk.Button(set_f, text="Load Style", command=self.load_named_style).grid(row=9, column=2, sticky="ew")
+        ttk.Button(set_f, text="Delete Style", command=self.delete_named_style).grid(row=10, column=2, sticky="ew")
 
         fx = ttk.LabelFrame(m, text="Effects", padding="10"); fx.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
         fx.columnconfigure(1, weight=1)
@@ -949,6 +1090,12 @@ class GlitchGUI:
     def update_beat_variation_label(self):
         if self.beat_variation_label:
             self.beat_variation_label.config(text=f"{self.beat_variation.get():.2f}")
+    def update_source_variety_label(self):
+        if self.source_variety_label:
+            self.source_variety_label.config(text=f"{self.source_variety.get():.2f}")
+    def update_color_match_strength_label(self):
+        if self.color_match_strength_label:
+            self.color_match_strength_label.config(text=f"{self.color_match_strength.get():.2f}")
     def load_styles_file(self):
         try:
             with open(STYLE_CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -994,6 +1141,12 @@ class GlitchGUI:
             "snippet_duration": self.snippet_duration.get(),
             "coherence": self.coherence.get(),
             "sensitivity": self.sensitivity.get(),
+            "source_variety": self.source_variety.get(),
+            "color_match_enabled": self.color_match_enabled.get(),
+            "color_match_strength": self.color_match_strength.get(),
+            "color_reference_idx": self.color_reference_idx,
+            "color_reference_label": self.color_reference_label.get(),
+            "lut_path": self.lut_path.get(),
             "beat_sync": self.beat_sync.get(),
             "beat_step": self.beat_step.get(),
             "beat_variation": self.beat_variation.get(),
@@ -1018,6 +1171,9 @@ class GlitchGUI:
             "output": self.output.get(),
             "primary_video_idx": self.primary_video_idx,
             "primary_video_label": self.primary_video_label.get(),
+            "color_reference_idx": self.color_reference_idx,
+            "color_reference_label": self.color_reference_label.get(),
+            "lut_path": self.lut_path.get(),
             "style_name": self.style_name.get(),
             "style_choice": self.style_choice.get(),
             "settings": self.collect_settings(),
@@ -1036,6 +1192,9 @@ class GlitchGUI:
         self.output.set(f"glitch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
         self.primary_video_idx = 0
         self.primary_video_label.set("Primary: first input")
+        self.color_reference_idx = 0
+        self.color_reference_label.set("Reference: first input")
+        self.lut_path.set("")
         self.style_name.set(DEFAULT_STYLE_NAME)
         if DEFAULT_STYLE_NAME in self.styles:
             self.style_choice.set(DEFAULT_STYLE_NAME)
@@ -1065,6 +1224,9 @@ class GlitchGUI:
         self.set_inputs(list(project.get("inputs", [])), int(project.get("primary_video_idx", 0) or 0))
         self.audio.set(project.get("audio", ""))
         self.output.set(project.get("output", self.output.get()))
+        self.color_reference_idx = int(project.get("color_reference_idx", 0) or 0)
+        self.update_color_reference_label(project.get("color_reference_label", "Reference: first input"))
+        self.lut_path.set(project.get("lut_path", self.lut_path.get()))
         if not self.inputs:
             self.primary_video_label.set(project.get("primary_video_label", "Primary: first input"))
         self.style_name.set(project.get("style_name", self.style_name.get()))
@@ -1121,6 +1283,12 @@ class GlitchGUI:
         self.snippet_duration.set(settings.get("snippet_duration", self.snippet_duration.get()))
         self.coherence.set(settings.get("coherence", self.coherence.get()))
         self.sensitivity.set(settings.get("sensitivity", self.sensitivity.get()))
+        self.source_variety.set(settings.get("source_variety", self.source_variety.get()))
+        self.color_match_enabled.set(settings.get("color_match_enabled", self.color_match_enabled.get()))
+        self.color_match_strength.set(settings.get("color_match_strength", self.color_match_strength.get()))
+        self.color_reference_idx = int(settings.get("color_reference_idx", self.color_reference_idx) or 0)
+        self.update_color_reference_label(settings.get("color_reference_label", self.color_reference_label.get()))
+        self.lut_path.set(settings.get("lut_path", self.lut_path.get()))
         self.beat_sync.set(settings.get("beat_sync", self.beat_sync.get()))
         self.beat_step.set(settings.get("beat_step", self.beat_step.get()))
         self.beat_variation.set(settings.get("beat_variation", self.beat_variation.get()))
@@ -1142,6 +1310,8 @@ class GlitchGUI:
         self.l_coh.config(text=f"{self.coherence.get():.2f}")
         self.l_sen.config(text=f"{self.sensitivity.get():.2f}")
         self.update_beat_variation_label()
+        self.update_source_variety_label()
+        self.update_color_match_strength_label()
         self.update_primary_focus_label()
     def save_named_style(self):
         name = self.style_name.get().strip()
@@ -1202,11 +1372,21 @@ class GlitchGUI:
         if not self.inputs:
             self.primary_video_idx = 0
             self.primary_video_label.set("Primary: first input")
+            self.color_reference_idx = 0
+            self.color_reference_label.set("Reference: first input")
             return
         if primary_idx is None:
             primary_idx = self.primary_video_idx
         self.primary_video_idx = int(np.clip(primary_idx, 0, len(self.inputs) - 1))
         self.primary_video_label.set(f"Primary: {os.path.basename(self.inputs[self.primary_video_idx])}")
+        self.color_reference_idx = int(np.clip(self.color_reference_idx, 0, len(self.inputs) - 1))
+        self.update_color_reference_label()
+    def update_color_reference_label(self, fallback="Reference: first input"):
+        if self.inputs and 0 <= self.color_reference_idx < len(self.inputs):
+            self.color_reference_label.set(f"Reference: {os.path.basename(self.inputs[self.color_reference_idx])}")
+        else:
+            self.color_reference_idx = 0
+            self.color_reference_label.set(fallback)
     def add_v(self):
         f = filedialog.askopenfilenames(filetypes=[("Video", "*.mp4 *.avi *.mov *.mkv *.webm")])
         for x in f:
@@ -1215,12 +1395,15 @@ class GlitchGUI:
                 if len(self.inputs) == 1:
                     self.primary_video_idx = 0
                     self.primary_video_label.set(f"Primary: {os.path.basename(x)}")
+                    self.color_reference_idx = 0
+                    self.update_color_reference_label()
     def remove_selected_inputs(self):
         selected = set(self.lb.curselection())
         if not selected:
             return messagebox.showinfo("Remove Inputs", "Select one or more input videos to remove.")
         new_inputs = [path for idx, path in enumerate(self.inputs) if idx not in selected]
         new_primary = self.primary_video_idx - sum(1 for idx in selected if idx < self.primary_video_idx)
+        self.color_reference_idx -= sum(1 for idx in selected if idx < self.color_reference_idx)
         self.set_inputs(new_inputs, new_primary)
     def clean_missing_inputs(self):
         missing = [path for path in self.inputs if not os.path.exists(path)]
@@ -1230,7 +1413,9 @@ class GlitchGUI:
             return
         existing = [path for path in self.inputs if os.path.exists(path)]
         primary_path = self.inputs[self.primary_video_idx] if self.inputs and 0 <= self.primary_video_idx < len(self.inputs) else None
+        color_ref_path = self.inputs[self.color_reference_idx] if self.inputs and 0 <= self.color_reference_idx < len(self.inputs) else None
         new_primary = existing.index(primary_path) if primary_path in existing else 0
+        self.color_reference_idx = existing.index(color_ref_path) if color_ref_path in existing else 0
         self.set_inputs(existing, new_primary)
         self.log_msg(f"Removed {len(missing)} missing input file(s).")
     def add_a(self):
@@ -1241,6 +1426,15 @@ class GlitchGUI:
         if not sel: return
         self.primary_video_idx = sel[0]
         self.primary_video_label.set(f"Primary: {os.path.basename(self.inputs[self.primary_video_idx])}")
+    def set_color_reference_video(self):
+        sel = self.lb.curselection()
+        if not sel: return
+        self.color_reference_idx = sel[0]
+        self.update_color_reference_label()
+    def pick_lut(self):
+        path = filedialog.askopenfilename(filetypes=[("Cube LUT", "*.cube"), ("All files", "*.*")])
+        if path:
+            self.lut_path.set(path)
     def update_p(self, curr, total):
         self.root.after(0, self._update_p_ui, curr, total)
     def _update_p_ui(self, curr, total):
@@ -1261,8 +1455,10 @@ class GlitchGUI:
             effect_amounts = {name: var.get() for name, var in self.effect_amounts.items()}
             primary_idx = self.primary_video_idx if self.primary_enabled.get() and self.inputs else None
             primary_focus = self.primary_focus.get() if self.primary_enabled.get() else 0.0
+            color_reference_idx = self.color_reference_idx if self.color_match_enabled.get() and self.inputs else None
+            color_match_strength = self.color_match_strength.get() if self.color_match_enabled.get() else 0.0
             render_limit = self.snippet_duration.get() if self.render_mode.get() == "Snippet" else None
-            p = GlitchProcessor(self.inputs, self.audio.get(), self.output.get(), self.duration.get(), self.fps.get(), self.pixelate.get(), self.flash.get(), self.rewind.get(), self.rgb_shift.get(), self.shake.get(), self.ghosting.get(), self.static_pan_zoom.get(), self.beat_sync.get(), self.coherence.get(), self.sensitivity.get(), export_mode, self.update_p, self.log_msg, self.display_frame, effect_amounts, primary_idx, primary_focus, self.beat_step.get(), self.beat_variation.get(), render_limit)
+            p = GlitchProcessor(self.inputs, self.audio.get(), self.output.get(), self.duration.get(), self.fps.get(), self.pixelate.get(), self.flash.get(), self.rewind.get(), self.rgb_shift.get(), self.shake.get(), self.ghosting.get(), self.static_pan_zoom.get(), self.beat_sync.get(), self.coherence.get(), self.sensitivity.get(), export_mode, self.update_p, self.log_msg, self.display_frame, effect_amounts, primary_idx, primary_focus, self.beat_step.get(), self.beat_variation.get(), render_limit, self.source_variety.get(), color_reference_idx, color_match_strength, self.lut_path.get().strip())
             p.process()
             self.root.after(0, self._render_complete_ui, export_mode)
         except Exception as e:

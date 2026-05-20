@@ -15,6 +15,8 @@ Audio-reactive video glitch tool that synchronizes video cuts and visual effects
 - **Per-Effect Amount Controls**: Fine tune each enabled effect independently instead of relying only on on/off toggles.
 - **Beat Interval and Variation**: Cut every N beats during Beat Sync, with optional extra cuts on skipped beats for variety.
 - **Duration Control**: When Beat Sync is off, set fixed edit lengths from 0 to 8 seconds.
+- **Source Variety**: Bias clip selection toward under-used input videos during a render.
+- **Color Matching and LUTs**: Match clips toward a selected reference video's cached color profile, or apply a user-supplied `.cube` LUT.
 - **Saved Styles**: Load starter styles and save/delete named settings presets. New sessions and new projects start from the built-in Default style.
 - **Snippet Rendering**: Render a short preview section, such as 30 seconds, before committing to a full export.
 - **Project Files**: New, save, save as, and load full project state, including media paths, output path, primary focus selection, style, and unsaved setting tweaks.
@@ -39,5 +41,6 @@ The Shotcut modes create a ZIP archive containing `glitchsync_project.mlt` and r
 ## Analysis Cache
 
 GlitchSync stores reusable video and audio analysis data in `~/.cache/glitchsync/analysis`.
+Video analysis includes brightness buckets, motion scores, and LAB color statistics for reference color matching.
 The cache is keyed by source path, file size, modified time, and cache version, so changed source files or analysis upgrades are re-scanned automatically.
 Use **File > Clear Analysis Cache...** to remove cached analysis files.
