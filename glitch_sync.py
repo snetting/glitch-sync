@@ -33,6 +33,88 @@ DEFAULT_EFFECT_AMOUNTS = {name: 1.0 for name in EFFECT_NAMES}
 STYLE_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".glitchsync_styles.json")
 
 
+def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=True,
+               beat_step=1, beat_variation=0.0, effects_enabled=None,
+               effect_amounts=None, primary_enabled=False, primary_focus=0.75,
+               export_mode_label="Final video (MP4)"):
+    return {
+        "export_mode_label": export_mode_label,
+        "duration": duration,
+        "fps": fps,
+        "coherence": coherence,
+        "sensitivity": sensitivity,
+        "beat_sync": beat_sync,
+        "beat_step": beat_step,
+        "beat_variation": beat_variation,
+        "effects_enabled": {
+            "pixelate": True,
+            "flash": True,
+            "rewind": True,
+            "rgb_shift": True,
+            "shake": True,
+            "ghosting": True,
+            **(effects_enabled or {}),
+        },
+        "effect_amounts": {
+            **DEFAULT_EFFECT_AMOUNTS,
+            **(effect_amounts or {}),
+        },
+        "primary_enabled": primary_enabled,
+        "primary_focus": primary_focus,
+    }
+
+
+BUILTIN_STYLES = {
+    "Mellow Story": make_style(
+        duration=0.8,
+        coherence=0.85,
+        sensitivity=0.55,
+        beat_step=8,
+        beat_variation=0.12,
+        effect_amounts={"pixelate": 0.25, "flash": 0.25, "rewind": 0.1, "rgb_shift": 0.3, "shake": 0.2, "ghosting": 0.7},
+        primary_focus=0.9,
+    ),
+    "Pop Performance": make_style(
+        coherence=0.65,
+        sensitivity=0.9,
+        beat_step=4,
+        beat_variation=0.25,
+        effect_amounts={"pixelate": 0.5, "flash": 0.55, "rewind": 0.2, "rgb_shift": 0.65, "shake": 0.45, "ghosting": 0.5},
+    ),
+    "EDM Pulse": make_style(
+        coherence=0.35,
+        sensitivity=1.35,
+        beat_step=2,
+        beat_variation=0.45,
+        effect_amounts={"pixelate": 1.2, "flash": 1.35, "rewind": 0.45, "rgb_shift": 1.25, "shake": 1.1, "ghosting": 0.65},
+    ),
+    "Rock Punch": make_style(
+        coherence=0.5,
+        sensitivity=1.15,
+        beat_step=2,
+        beat_variation=0.25,
+        effect_amounts={"pixelate": 0.65, "flash": 0.7, "rewind": 0.25, "rgb_shift": 0.75, "shake": 1.25, "ghosting": 0.35},
+    ),
+    "Ambient Drift": make_style(
+        duration=1.0,
+        coherence=0.95,
+        sensitivity=0.4,
+        beat_step=16,
+        beat_variation=0.05,
+        effects_enabled={"pixelate": False, "rewind": False, "shake": False},
+        effect_amounts={"pixelate": 0.0, "flash": 0.15, "rewind": 0.0, "rgb_shift": 0.2, "shake": 0.0, "ghosting": 1.2},
+        primary_focus=0.95,
+    ),
+    "Glitch Heavy": make_style(
+        coherence=0.15,
+        sensitivity=1.75,
+        beat_step=1,
+        beat_variation=0.0,
+        effect_amounts={"pixelate": 1.7, "flash": 1.2, "rewind": 0.8, "rgb_shift": 1.8, "shake": 1.4, "ghosting": 1.0},
+    ),
+}
+
+
 def frame_count_to_out(frame_count):
     return max(0, frame_count - 1)
 
@@ -253,7 +335,7 @@ class GlitchProcessor:
                  export_mode=EXPORT_FINAL_VIDEO,
                  progress_callback=None, log_callback=None, frame_callback=None,
                  effect_amounts=None, primary_video_idx=None, primary_focus=0.0,
-                 beat_step=1, beat_variation=0.0):
+                 beat_step=1, beat_variation=0.0, render_limit=None):
         self.inputs, self.audio, self.output = inputs, audio, output
         self.duration, self.fps = duration, fps
         self.pixelate, self.flash, self.rewind = pixelate, flash, rewind
@@ -262,6 +344,7 @@ class GlitchProcessor:
         self.export_mode = export_mode
         self.beat_step = max(1, int(beat_step))
         self.beat_variation = np.clip(float(beat_variation), 0, 1)
+        self.render_limit = float(render_limit) if render_limit else None
         self.effect_amounts = DEFAULT_EFFECT_AMOUNTS.copy()
         if effect_amounts:
             for name in EFFECT_NAMES:
@@ -378,6 +461,14 @@ class GlitchProcessor:
         else:
             cut_times = np.arange(0, audio_duration, self.duration)
 
+        render_duration = audio_duration
+        if self.render_limit:
+            render_duration = min(audio_duration, max(self.duration, self.render_limit))
+            cut_times = cut_times[cut_times < render_duration]
+            if len(cut_times) == 0 or cut_times[0] > 0:
+                cut_times = np.insert(cut_times, 0, 0)
+            self.log(f"  Render limit: {render_duration:.1f}s")
+
         times = librosa.times_like(rms_energy, sr=sr)
         def get_val(arr, t): return arr[min(np.searchsorted(times, t), len(arr)-1)]
         
@@ -407,7 +498,7 @@ class GlitchProcessor:
         for i in range(len(cut_times)):
             if self.stop_requested: break
             t_start = cut_times[i]
-            dur = (cut_times[i+1] if i+1 < len(cut_times) else audio_duration) - t_start
+            dur = (cut_times[i+1] if i+1 < len(cut_times) else render_duration) - t_start
             num_frames = max(1, int(dur * self.fps))
             
             curr_rms = np.clip(float(get_val(rms_energy, t_start)) / max_rms, 0, 1)
@@ -550,6 +641,8 @@ class GlitchGUI:
         self.output = tk.StringVar(value=f"glitch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
         self.export_mode_label = tk.StringVar(value="Final video (MP4)")
         self.duration, self.fps, self.coherence, self.sensitivity = tk.DoubleVar(value=0.10), tk.IntVar(value=30), tk.DoubleVar(value=0.20), tk.DoubleVar(value=1.0)
+        self.render_mode = tk.StringVar(value="Full")
+        self.snippet_duration = tk.DoubleVar(value=30.0)
         self.beat_step = tk.IntVar(value=1)
         self.beat_variation = tk.DoubleVar(value=0.0)
         self.beat_variation_label = None
@@ -587,12 +680,17 @@ class GlitchGUI:
         ttk.Combobox(io, textvariable=self.export_mode_label, values=list(EXPORT_MODE_LABELS.keys()), state="readonly").grid(row=2, column=1, sticky="ew")
         ttk.Label(io, text="Out:").grid(row=3, column=0)
         ttk.Entry(io, textvariable=self.output).grid(row=3, column=1, sticky="ew")
-        ttk.Checkbutton(io, text="Primary focus", variable=self.primary_enabled).grid(row=4, column=0, sticky="w")
-        ttk.Button(io, text="Set Selected", command=self.set_primary_video).grid(row=4, column=1, sticky="w", pady=5)
-        ttk.Label(io, textvariable=self.primary_video_label).grid(row=4, column=2, sticky="w")
-        ttk.Label(io, text="Focus:").grid(row=5, column=0, sticky="w")
-        ttk.Scale(io, from_=0.0, to=1.0, variable=self.primary_focus, command=lambda e: self.update_primary_focus_label()).grid(row=5, column=1, sticky="ew")
-        self.primary_focus_label = ttk.Label(io, text="0.75"); self.primary_focus_label.grid(row=5, column=2, sticky="w")
+        ttk.Button(io, text="Save Project", command=self.save_project).grid(row=4, column=1, sticky="w", pady=5)
+        ttk.Button(io, text="Load Project", command=self.load_project).grid(row=4, column=2, sticky="w", pady=5)
+        ttk.Label(io, text="Render length:").grid(row=5, column=0, sticky="w")
+        ttk.Combobox(io, textvariable=self.render_mode, values=["Full", "Snippet"], state="readonly", width=10).grid(row=5, column=1, sticky="w", pady=5)
+        ttk.Spinbox(io, from_=1, to=3600, textvariable=self.snippet_duration, width=7).grid(row=5, column=2, sticky="w")
+        ttk.Checkbutton(io, text="Primary focus", variable=self.primary_enabled).grid(row=6, column=0, sticky="w")
+        ttk.Button(io, text="Set Selected", command=self.set_primary_video).grid(row=6, column=1, sticky="w", pady=5)
+        ttk.Label(io, textvariable=self.primary_video_label).grid(row=6, column=2, sticky="w")
+        ttk.Label(io, text="Focus:").grid(row=7, column=0, sticky="w")
+        ttk.Scale(io, from_=0.0, to=1.0, variable=self.primary_focus, command=lambda e: self.update_primary_focus_label()).grid(row=7, column=1, sticky="ew")
+        self.primary_focus_label = ttk.Label(io, text="0.75"); self.primary_focus_label.grid(row=7, column=2, sticky="w")
 
         pv = ttk.LabelFrame(m, text="Live Preview & Review", padding="10"); pv.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
         self.cv = tk.Canvas(pv, width=480, height=270, bg="black"); self.cv.pack(pady=5)
@@ -626,6 +724,7 @@ class GlitchGUI:
         self.style_combo = ttk.Combobox(set_f, textvariable=self.style_choice, state="readonly")
         self.style_combo.grid(row=8, column=1, sticky="ew")
         ttk.Button(set_f, text="Load Style", command=self.load_named_style).grid(row=8, column=2, sticky="ew")
+        ttk.Button(set_f, text="Delete Style", command=self.delete_named_style).grid(row=9, column=2, sticky="ew")
 
         fx = ttk.LabelFrame(m, text="Effects", padding="10"); fx.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
         fx.columnconfigure(1, weight=1)
@@ -662,17 +761,23 @@ class GlitchGUI:
         try:
             with open(STYLE_CONFIG_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            return data if isinstance(data, dict) else {}
+            styles = data if isinstance(data, dict) else {}
         except FileNotFoundError:
-            return {}
+            styles = {}
         except Exception as e:
             print(f"Could not load styles: {e}")
-            return {}
+            styles = {}
+        return self.with_builtin_styles(styles)
+    def with_builtin_styles(self, styles):
+        deleted = set(styles.get("_deleted_builtin_styles", []))
+        merged = json.loads(json.dumps({name: style for name, style in BUILTIN_STYLES.items() if name not in deleted}))
+        merged.update(styles)
+        return merged
     def save_styles_file(self):
         with open(STYLE_CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(self.styles, f, indent=2, sort_keys=True)
     def style_names(self):
-        return sorted(name for name in self.styles if name != "_last")
+        return sorted(name for name in self.styles if not name.startswith("_"))
     def refresh_style_choices(self):
         names = self.style_names()
         if self.style_combo:
@@ -684,6 +789,8 @@ class GlitchGUI:
             "export_mode_label": self.export_mode_label.get(),
             "duration": self.duration.get(),
             "fps": self.fps.get(),
+            "render_mode": self.render_mode.get(),
+            "snippet_duration": self.snippet_duration.get(),
             "coherence": self.coherence.get(),
             "sensitivity": self.sensitivity.get(),
             "beat_sync": self.beat_sync.get(),
@@ -701,6 +808,62 @@ class GlitchGUI:
             "primary_enabled": self.primary_enabled.get(),
             "primary_focus": self.primary_focus.get(),
         }
+    def collect_project(self):
+        return {
+            "version": 1,
+            "inputs": self.inputs,
+            "audio": self.audio.get(),
+            "output": self.output.get(),
+            "primary_video_idx": self.primary_video_idx,
+            "primary_video_label": self.primary_video_label.get(),
+            "style_name": self.style_name.get(),
+            "style_choice": self.style_choice.get(),
+            "settings": self.collect_settings(),
+        }
+    def apply_project(self, project):
+        if not isinstance(project, dict):
+            raise ValueError("Invalid project file")
+        self.inputs = list(project.get("inputs", []))
+        self.lb.delete(0, tk.END)
+        for path in self.inputs:
+            self.lb.insert(tk.END, os.path.basename(path))
+        self.audio.set(project.get("audio", ""))
+        self.output.set(project.get("output", self.output.get()))
+        self.primary_video_idx = int(project.get("primary_video_idx", 0) or 0)
+        if self.inputs and not (0 <= self.primary_video_idx < len(self.inputs)):
+            self.primary_video_idx = 0
+        if self.inputs:
+            self.primary_video_label.set(f"Primary: {os.path.basename(self.inputs[self.primary_video_idx])}")
+        else:
+            self.primary_video_label.set(project.get("primary_video_label", "Primary: first input"))
+        self.style_name.set(project.get("style_name", self.style_name.get()))
+        if project.get("style_choice"):
+            self.style_choice.set(project["style_choice"])
+        self.apply_settings(project.get("settings", {}))
+    def save_project(self):
+        path = filedialog.asksaveasfilename(
+            defaultextension=".glitchsync.json",
+            filetypes=[("GlitchSync Project", "*.glitchsync.json"), ("JSON", "*.json")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self.collect_project(), f, indent=2, sort_keys=True)
+        except Exception as e:
+            return messagebox.showerror("Error", f"Could not save project: {e}")
+        messagebox.showinfo("Saved", f"Saved project: {os.path.basename(path)}")
+    def load_project(self):
+        path = filedialog.askopenfilename(filetypes=[("GlitchSync Project", "*.glitchsync.json"), ("JSON", "*.json")])
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                project = json.load(f)
+            self.apply_project(project)
+        except Exception as e:
+            return messagebox.showerror("Error", f"Could not load project: {e}")
+        messagebox.showinfo("Loaded", f"Loaded project: {os.path.basename(path)}")
     def apply_settings(self, settings):
         if not isinstance(settings, dict):
             return
@@ -708,6 +871,9 @@ class GlitchGUI:
             self.export_mode_label.set(settings["export_mode_label"])
         self.duration.set(settings.get("duration", self.duration.get()))
         self.fps.set(settings.get("fps", self.fps.get()))
+        if settings.get("render_mode") in ("Full", "Snippet"):
+            self.render_mode.set(settings["render_mode"])
+        self.snippet_duration.set(settings.get("snippet_duration", self.snippet_duration.get()))
         self.coherence.set(settings.get("coherence", self.coherence.get()))
         self.sensitivity.set(settings.get("sensitivity", self.sensitivity.get()))
         self.beat_sync.set(settings.get("beat_sync", self.beat_sync.get()))
@@ -735,6 +901,8 @@ class GlitchGUI:
         name = self.style_name.get().strip()
         if not name:
             return messagebox.showerror("Error", "Style name is required")
+        if name in BUILTIN_STYLES and name in self.styles.get("_deleted_builtin_styles", []):
+            self.styles["_deleted_builtin_styles"].remove(name)
         self.styles[name] = self.collect_settings()
         try:
             self.save_styles_file()
@@ -749,6 +917,27 @@ class GlitchGUI:
             return messagebox.showerror("Error", "Select a saved style to load")
         self.apply_settings(self.styles[name])
         self.style_name.set(name)
+    def delete_named_style(self):
+        name = self.style_choice.get() or self.style_name.get().strip()
+        if not name or name not in self.styles:
+            return messagebox.showerror("Error", "Select a saved style to delete")
+        if name == "_last":
+            return messagebox.showerror("Error", "The automatic last-used style cannot be deleted")
+        if not messagebox.askyesno("Delete Style", f"Delete style '{name}'?"):
+            return
+        if name in BUILTIN_STYLES:
+            deleted = self.styles.setdefault("_deleted_builtin_styles", [])
+            if name not in deleted:
+                deleted.append(name)
+        del self.styles[name]
+        try:
+            self.save_styles_file()
+        except Exception as e:
+            return messagebox.showerror("Error", f"Could not delete style: {e}")
+        self.refresh_style_choices()
+        if self.style_choice.get() == name:
+            self.style_choice.set(self.style_names()[0] if self.style_names() else "")
+        messagebox.showinfo("Deleted", f"Deleted style: {name}")
     def save_last_settings(self):
         self.styles["_last"] = self.collect_settings()
         try:
@@ -791,7 +980,8 @@ class GlitchGUI:
             effect_amounts = {name: var.get() for name, var in self.effect_amounts.items()}
             primary_idx = self.primary_video_idx if self.primary_enabled.get() and self.inputs else None
             primary_focus = self.primary_focus.get() if self.primary_enabled.get() else 0.0
-            p = GlitchProcessor(self.inputs, self.audio.get(), self.output.get(), self.duration.get(), self.fps.get(), self.pixelate.get(), self.flash.get(), self.rewind.get(), self.rgb_shift.get(), self.shake.get(), self.ghosting.get(), self.beat_sync.get(), self.coherence.get(), self.sensitivity.get(), export_mode, self.update_p, self.log_msg, self.display_frame, effect_amounts, primary_idx, primary_focus, self.beat_step.get(), self.beat_variation.get())
+            render_limit = self.snippet_duration.get() if self.render_mode.get() == "Snippet" else None
+            p = GlitchProcessor(self.inputs, self.audio.get(), self.output.get(), self.duration.get(), self.fps.get(), self.pixelate.get(), self.flash.get(), self.rewind.get(), self.rgb_shift.get(), self.shake.get(), self.ghosting.get(), self.beat_sync.get(), self.coherence.get(), self.sensitivity.get(), export_mode, self.update_p, self.log_msg, self.display_frame, effect_amounts, primary_idx, primary_focus, self.beat_step.get(), self.beat_variation.get(), render_limit)
             p.process()
             self.root.after(0, self._render_complete_ui, export_mode)
         except Exception as e:
@@ -825,9 +1015,10 @@ if __name__ == "__main__":
     p.add_argument("--export-mode", choices=[EXPORT_FINAL_VIDEO, EXPORT_CUT_AWARE_MLT, EXPORT_CLIP_MLT], default=EXPORT_FINAL_VIDEO)
     p.add_argument("--beat-step", type=int, default=1)
     p.add_argument("--beat-variation", type=float, default=0.0)
+    p.add_argument("--render-limit", type=float)
     args = p.parse_args()
     if args.gui or not (args.inputs and args.audio):
         r = tk.Tk(); g = GlitchGUI(r); r.mainloop()
     else:
-        proc = GlitchProcessor(args.inputs, args.audio, args.output, beat_sync=args.beat_sync, export_mode=args.export_mode, progress_callback=lambda c, t: print(f"Progress: {c}/{t}", end='\r'), beat_step=args.beat_step, beat_variation=args.beat_variation)
+        proc = GlitchProcessor(args.inputs, args.audio, args.output, beat_sync=args.beat_sync, export_mode=args.export_mode, progress_callback=lambda c, t: print(f"Progress: {c}/{t}", end='\r'), beat_step=args.beat_step, beat_variation=args.beat_variation, render_limit=args.render_limit)
         proc.process()
