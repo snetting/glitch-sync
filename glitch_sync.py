@@ -10,6 +10,7 @@ import threading
 import shutil
 import tempfile
 import zipfile
+import json
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from tkinter import filedialog, messagebox, ttk
@@ -26,6 +27,10 @@ EXPORT_MODE_LABELS = {
     "Cut-aware Shotcut MLT (ZIP)": EXPORT_CUT_AWARE_MLT,
     "Clip Shotcut MLT (ZIP)": EXPORT_CLIP_MLT,
 }
+
+EFFECT_NAMES = ("pixelate", "flash", "rewind", "rgb_shift", "shake", "ghosting")
+DEFAULT_EFFECT_AMOUNTS = {name: 1.0 for name in EFFECT_NAMES}
+STYLE_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".glitchsync_styles.json")
 
 
 def frame_count_to_out(frame_count):
@@ -188,14 +193,15 @@ def zip_directory(source_dir, zip_path):
 
 # --- Effects Functions ---
 
-def apply_pixelate(frame, intensity, high_intensity, sensitivity=1.0):
+def apply_pixelate(frame, intensity, high_intensity, sensitivity=1.0, probability_scale=1.0):
     """
     Improved: Only triggers on high-frequency transients.
     Designed to be an occasional accent rather than a theme.
     """
     # Only trigger if there is a significant high-frequency spike AND a random roll
     # This makes it feel much more like an intentional 'glitch'
-    if high_intensity < 0.45 or random.random() > 0.25: 
+    trigger_probability = np.clip(0.25 * probability_scale, 0, 1)
+    if high_intensity < 0.45 or random.random() > trigger_probability:
         return frame 
     
     h, w = frame.shape[:2]
@@ -245,13 +251,23 @@ class GlitchProcessor:
                  rgb_shift=False, shake=False, ghosting=False,
                  beat_sync=False, coherence=0.7, sensitivity=1.0,
                  export_mode=EXPORT_FINAL_VIDEO,
-                 progress_callback=None, log_callback=None, frame_callback=None):
+                 progress_callback=None, log_callback=None, frame_callback=None,
+                 effect_amounts=None, primary_video_idx=None, primary_focus=0.0,
+                 beat_step=1, beat_variation=0.0):
         self.inputs, self.audio, self.output = inputs, audio, output
         self.duration, self.fps = duration, fps
         self.pixelate, self.flash, self.rewind = pixelate, flash, rewind
         self.rgb_shift, self.shake, self.ghosting = rgb_shift, shake, ghosting
         self.beat_sync, self.coherence, self.sensitivity = beat_sync, coherence, sensitivity
         self.export_mode = export_mode
+        self.beat_step = max(1, int(beat_step))
+        self.beat_variation = np.clip(float(beat_variation), 0, 1)
+        self.effect_amounts = DEFAULT_EFFECT_AMOUNTS.copy()
+        if effect_amounts:
+            for name in EFFECT_NAMES:
+                self.effect_amounts[name] = max(0.0, float(effect_amounts.get(name, 1.0)))
+        self.primary_video_idx = primary_video_idx if primary_video_idx is not None else None
+        self.primary_focus = np.clip(float(primary_focus), 0, 1)
         self.progress_callback, self.log_callback, self.frame_callback = progress_callback, log_callback, frame_callback
         self.stop_requested = False
         self.current_vid_idx = 0
@@ -259,6 +275,32 @@ class GlitchProcessor:
     def log(self, msg):
         if self.log_callback: self.log_callback(msg)
         else: print(msg)
+
+    def effect_amount(self, name):
+        return self.effect_amounts.get(name, 1.0)
+
+    def use_primary_video(self):
+        return (
+            self.primary_video_idx is not None
+            and 0 <= self.primary_video_idx < len(self.inputs)
+            and self.primary_focus > 0
+        )
+
+    def select_beat_cut_times(self, beats, sr):
+        beat_times = librosa.frames_to_time(beats, sr=sr)
+        if self.beat_step <= 1 and self.beat_variation <= 0:
+            return beat_times
+
+        selected = []
+        for idx, beat_time in enumerate(beat_times):
+            is_main_cut = idx % self.beat_step == 0
+            is_variation_cut = random.random() < self.beat_variation
+            if is_main_cut or is_variation_cut:
+                selected.append(beat_time)
+
+        if len(selected) < 2 and len(beat_times) >= 2:
+            selected = [beat_times[0], beat_times[-1]]
+        return np.array(selected)
 
     def analyze_source_videos(self):
         self.log("Indexing video frames...")
@@ -281,11 +323,15 @@ class GlitchProcessor:
 
     def find_best_match(self, target_b, frame_db, current_vid_idx):
         search_range = 8
-        candidates_current, candidates_other = [], []
+        candidates_current, candidates_other, candidates_primary = [], [], []
         for b in range(max(0, target_b - search_range), min(255, target_b + search_range) + 1):
             for v_idx, f_idx in frame_db[b]:
+                if self.use_primary_video() and v_idx == self.primary_video_idx:
+                    candidates_primary.append((v_idx, f_idx))
                 if v_idx == current_vid_idx: candidates_current.append((v_idx, f_idx))
                 else: candidates_other.append((v_idx, f_idx))
+        if candidates_primary and random.random() < self.primary_focus:
+            return random.choice(candidates_primary)
         if candidates_current and (random.random() < self.coherence or not candidates_other):
             return random.choice(candidates_current)
         if candidates_other: return random.choice(candidates_other)
@@ -293,8 +339,13 @@ class GlitchProcessor:
         while offset < 256:
             low, high = target_b - offset, target_b + offset
             fallback = []
+            primary_fallback = []
             if low >= 0: fallback.extend(frame_db[low])
             if high <= 255: fallback.extend(frame_db[high])
+            if self.use_primary_video():
+                primary_fallback = [item for item in fallback if item[0] == self.primary_video_idx]
+                if primary_fallback and random.random() < self.primary_focus:
+                    return random.choice(primary_fallback)
             if fallback: return random.choice(fallback)
             offset += 1
         return None
@@ -318,8 +369,12 @@ class GlitchProcessor:
             self.log("Detecting beats...")
             tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
             tempo_val = float(tempo) if np.isscalar(tempo) else float(tempo[0])
-            cut_times = librosa.frames_to_time(beats, sr=sr)
+            cut_times = self.select_beat_cut_times(beats, sr)
             self.log(f"  Tempo: {tempo_val:.1f} BPM")
+            self.log(f"  Beat step: {self.beat_step}; variation: {self.beat_variation:.2f}")
+            if len(cut_times) < 2:
+                self.log("  Not enough beats detected; falling back to duration cuts.")
+                cut_times = np.arange(0, audio_duration, self.duration)
         else:
             cut_times = np.arange(0, audio_duration, self.duration)
 
@@ -347,6 +402,8 @@ class GlitchProcessor:
             os.makedirs(clip_dir, exist_ok=True)
 
         self.log("Rendering...")
+        if self.use_primary_video():
+            self.log(f"  Primary focus: {os.path.basename(self.inputs[self.primary_video_idx])} ({self.primary_focus:.2f})")
         for i in range(len(cut_times)):
             if self.stop_requested: break
             t_start = cut_times[i]
@@ -366,16 +423,28 @@ class GlitchProcessor:
                 for _ in range(num_frames):
                     r, f = caps[self.current_vid_idx].read()
                     if r: chunk.append(f)
-                if self.rewind and curr_rms > 0.75: chunk = chunk[::-1]
+                rewind_amount = self.effect_amount("rewind")
+                if self.rewind and curr_rms > 0.75 and random.random() < min(1.0, rewind_amount):
+                    chunk = chunk[::-1]
 
+                pixelate_amount = self.effect_amount("pixelate")
+                flash_amount = self.effect_amount("flash")
+                rgb_shift_amount = self.effect_amount("rgb_shift")
+                shake_amount = self.effect_amount("shake")
+                ghosting_amount = self.effect_amount("ghosting")
                 segment_frames = []
                 for f in chunk:
                     if f.shape[:2] != (height, width): f = cv2.resize(f, (width, height))
-                    if self.pixelate: f = apply_pixelate(f, curr_rms, curr_highs, self.sensitivity)
-                    if self.flash: f = apply_brightness_boost(f, curr_rms, self.sensitivity)
-                    if self.rgb_shift: f = apply_rgb_shift(f, curr_highs, self.sensitivity)
-                    if self.shake: f = apply_shake(f, curr_bass, self.sensitivity)
-                    if self.ghosting: f = apply_ghosting(f, prev_f, curr_mids, self.sensitivity)
+                    if self.pixelate and pixelate_amount > 0:
+                        f = apply_pixelate(f, curr_rms, curr_highs, self.sensitivity * pixelate_amount, pixelate_amount)
+                    if self.flash and flash_amount > 0:
+                        f = apply_brightness_boost(f, curr_rms, self.sensitivity * flash_amount)
+                    if self.rgb_shift and rgb_shift_amount > 0:
+                        f = apply_rgb_shift(f, curr_highs, self.sensitivity * rgb_shift_amount)
+                    if self.shake and shake_amount > 0:
+                        f = apply_shake(f, curr_bass, self.sensitivity * shake_amount)
+                    if self.ghosting and ghosting_amount > 0:
+                        f = apply_ghosting(f, prev_f, curr_mids, self.sensitivity * ghosting_amount)
                     out.write(f)
                     if self.export_mode == EXPORT_CLIP_MLT:
                         segment_frames.append(f)
@@ -416,12 +485,22 @@ class GlitchProcessor:
             self.log("Exporting final stage...")
             if self.progress_callback: self.progress_callback(-1, -1)
             if self.export_mode == EXPORT_FINAL_VIDEO:
-                subprocess.run(['ffmpeg', '-y', '-i', temp_video, '-i', self.audio, '-c:v', 'libx264', '-preset', 'medium', '-crf', '21', '-c:a', 'aac', '-b:a', '192k', '-shortest', self.output], capture_output=True)
+                self.export_final_video(temp_video)
             else:
                 self.export_shotcut_archive(temp_video, segments, width, height, package_dir)
         if os.path.exists(temp_video): os.remove(temp_video)
         if package_dir and os.path.exists(package_dir): shutil.rmtree(package_dir)
         self.log("Done!")
+
+    def export_final_video(self, temp_video):
+        root, ext = os.path.splitext(self.output)
+        final_temp = f"{root or self.output}.tmp_{random.randint(1000, 9999)}{ext or '.mp4'}"
+        result = subprocess.run(['ffmpeg', '-y', '-i', temp_video, '-i', self.audio, '-c:v', 'libx264', '-preset', 'medium', '-crf', '21', '-c:a', 'aac', '-b:a', '192k', '-shortest', final_temp], capture_output=True)
+        if result.returncode != 0:
+            if os.path.exists(final_temp):
+                os.remove(final_temp)
+            raise RuntimeError(result.stderr.decode(errors="ignore") or "ffmpeg failed while creating final video")
+        os.replace(final_temp, self.output)
 
     def export_shotcut_archive(self, temp_video, segments, width, height, package_dir=None):
         if not segments:
@@ -465,15 +544,33 @@ class GlitchGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("GlitchSync Pro v3.8")
-        self.root.geometry("1100x950")
+        self.root.geometry("1180x1120")
+        self.root.minsize(1100, 1050)
         self.inputs, self.audio = [], tk.StringVar()
         self.output = tk.StringVar(value=f"glitch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
         self.export_mode_label = tk.StringVar(value="Final video (MP4)")
         self.duration, self.fps, self.coherence, self.sensitivity = tk.DoubleVar(value=0.10), tk.IntVar(value=30), tk.DoubleVar(value=0.20), tk.DoubleVar(value=1.0)
+        self.beat_step = tk.IntVar(value=1)
+        self.beat_variation = tk.DoubleVar(value=0.0)
+        self.beat_variation_label = None
+        self.effect_amounts = {name: tk.DoubleVar(value=1.0) for name in EFFECT_NAMES}
+        self.effect_amount_labels = {}
+        self.primary_enabled = tk.BooleanVar(value=False)
+        self.primary_focus = tk.DoubleVar(value=0.75)
+        self.primary_focus_label = None
+        self.primary_video_idx = 0
+        self.primary_video_label = tk.StringVar(value="Primary: first input")
         self.beat_sync = tk.BooleanVar(value=True)
         self.pixelate, self.flash, self.rewind, self.rgb_shift, self.shake, self.ghosting = [tk.BooleanVar(value=True) for _ in range(6)]
+        self.style_name = tk.StringVar(value="Default")
+        self.style_choice = tk.StringVar()
+        self.style_combo = None
+        self.styles = self.load_styles_file()
         self.last_progress_val = 0
         self.build_ui()
+        self.refresh_style_choices()
+        if "_last" in self.styles:
+            self.apply_settings(self.styles["_last"])
 
     def build_ui(self):
         m = ttk.Frame(self.root, padding="15"); m.pack(fill=tk.BOTH, expand=True)
@@ -490,6 +587,12 @@ class GlitchGUI:
         ttk.Combobox(io, textvariable=self.export_mode_label, values=list(EXPORT_MODE_LABELS.keys()), state="readonly").grid(row=2, column=1, sticky="ew")
         ttk.Label(io, text="Out:").grid(row=3, column=0)
         ttk.Entry(io, textvariable=self.output).grid(row=3, column=1, sticky="ew")
+        ttk.Checkbutton(io, text="Primary focus", variable=self.primary_enabled).grid(row=4, column=0, sticky="w")
+        ttk.Button(io, text="Set Selected", command=self.set_primary_video).grid(row=4, column=1, sticky="w", pady=5)
+        ttk.Label(io, textvariable=self.primary_video_label).grid(row=4, column=2, sticky="w")
+        ttk.Label(io, text="Focus:").grid(row=5, column=0, sticky="w")
+        ttk.Scale(io, from_=0.0, to=1.0, variable=self.primary_focus, command=lambda e: self.update_primary_focus_label()).grid(row=5, column=1, sticky="ew")
+        self.primary_focus_label = ttk.Label(io, text="0.75"); self.primary_focus_label.grid(row=5, column=2, sticky="w")
 
         pv = ttk.LabelFrame(m, text="Live Preview & Review", padding="10"); pv.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
         self.cv = tk.Canvas(pv, width=480, height=270, bg="black"); self.cv.pack(pady=5)
@@ -497,26 +600,41 @@ class GlitchGUI:
         ttk.Label(pv, text="Click REVIEW to watch with full audio sync.", wraplength=450, justify=tk.CENTER).pack(pady=5)
 
         set_f = ttk.LabelFrame(m, text="Parameters", padding="10"); set_f.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+        set_f.columnconfigure(1, weight=1)
         ttk.Checkbutton(set_f, text="Beat Sync", variable=self.beat_sync).grid(row=0, column=0, sticky="w")
-        ttk.Label(set_f, text="Dur:").grid(row=1, column=0)
-        ttk.Scale(set_f, from_=0.01, to=1.0, variable=self.duration, command=lambda e: self.l_dur.config(text=f"{self.duration.get():.2f}")).grid(row=1, column=1, sticky="ew")
-        self.l_dur = ttk.Label(set_f, text="0.10"); self.l_dur.grid(row=1, column=2)
-        ttk.Label(set_f, text="Coh:").grid(row=2, column=0)
-        ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.coherence, command=lambda e: self.l_coh.config(text=f"{self.coherence.get():.2f}")).grid(row=2, column=1, sticky="ew")
-        self.l_coh = ttk.Label(set_f, text="0.20"); self.l_coh.grid(row=2, column=2)
-        ttk.Label(set_f, text="Sens:").grid(row=3, column=0)
-        ttk.Scale(set_f, from_=0.1, to=3.0, variable=self.sensitivity, command=lambda e: self.l_sen.config(text=f"{self.sensitivity.get():.2f}")).grid(row=3, column=1, sticky="ew")
-        self.l_sen = ttk.Label(set_f, text="1.00"); self.l_sen.grid(row=3, column=2)
-        ttk.Label(set_f, text="FPS:").grid(row=4, column=0)
-        ttk.Spinbox(set_f, from_=1, to=120, textvariable=self.fps, width=5).grid(row=4, column=1, sticky="w")
+        ttk.Label(set_f, text="Beat interval:").grid(row=1, column=0)
+        ttk.Spinbox(set_f, from_=1, to=64, textvariable=self.beat_step, width=5).grid(row=1, column=1, sticky="w")
+        ttk.Label(set_f, text="beats").grid(row=1, column=2, sticky="w")
+        ttk.Label(set_f, text="Beat variation:").grid(row=2, column=0)
+        ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.beat_variation, command=lambda e: self.update_beat_variation_label()).grid(row=2, column=1, sticky="ew")
+        self.beat_variation_label = ttk.Label(set_f, text="0.00"); self.beat_variation_label.grid(row=2, column=2)
+        ttk.Label(set_f, text="Duration (no Beat Sync):").grid(row=3, column=0)
+        ttk.Scale(set_f, from_=0.01, to=1.0, variable=self.duration, command=lambda e: self.l_dur.config(text=f"{self.duration.get():.2f}")).grid(row=3, column=1, sticky="ew")
+        self.l_dur = ttk.Label(set_f, text="0.10"); self.l_dur.grid(row=3, column=2)
+        ttk.Label(set_f, text="Coherence:").grid(row=4, column=0)
+        ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.coherence, command=lambda e: self.l_coh.config(text=f"{self.coherence.get():.2f}")).grid(row=4, column=1, sticky="ew")
+        self.l_coh = ttk.Label(set_f, text="0.20"); self.l_coh.grid(row=4, column=2)
+        ttk.Label(set_f, text="Sensitivity:").grid(row=5, column=0)
+        ttk.Scale(set_f, from_=0.1, to=3.0, variable=self.sensitivity, command=lambda e: self.l_sen.config(text=f"{self.sensitivity.get():.2f}")).grid(row=5, column=1, sticky="ew")
+        self.l_sen = ttk.Label(set_f, text="1.00"); self.l_sen.grid(row=5, column=2)
+        ttk.Label(set_f, text="FPS:").grid(row=6, column=0)
+        ttk.Spinbox(set_f, from_=1, to=120, textvariable=self.fps, width=5).grid(row=6, column=1, sticky="w")
+        ttk.Label(set_f, text="Style name:").grid(row=7, column=0)
+        ttk.Entry(set_f, textvariable=self.style_name).grid(row=7, column=1, sticky="ew")
+        ttk.Button(set_f, text="Save Style", command=self.save_named_style).grid(row=7, column=2, sticky="ew")
+        ttk.Label(set_f, text="Load style:").grid(row=8, column=0)
+        self.style_combo = ttk.Combobox(set_f, textvariable=self.style_choice, state="readonly")
+        self.style_combo.grid(row=8, column=1, sticky="ew")
+        ttk.Button(set_f, text="Load Style", command=self.load_named_style).grid(row=8, column=2, sticky="ew")
 
         fx = ttk.LabelFrame(m, text="Effects", padding="10"); fx.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
-        ttk.Checkbutton(fx, text="Pixelate", variable=self.pixelate).grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(fx, text="Flash", variable=self.flash).grid(row=0, column=1, sticky="w")
-        ttk.Checkbutton(fx, text="Rewind", variable=self.rewind).grid(row=1, column=0, sticky="w")
-        ttk.Checkbutton(fx, text="RGB Shift", variable=self.rgb_shift).grid(row=1, column=1, sticky="w")
-        ttk.Checkbutton(fx, text="Shake", variable=self.shake).grid(row=2, column=0, sticky="w")
-        ttk.Checkbutton(fx, text="Ghosting", variable=self.ghosting).grid(row=2, column=1, sticky="w")
+        fx.columnconfigure(1, weight=1)
+        self.add_effect_control(fx, 0, "Pixelate", self.pixelate, "pixelate")
+        self.add_effect_control(fx, 1, "Flash", self.flash, "flash")
+        self.add_effect_control(fx, 2, "Rewind", self.rewind, "rewind", 1.0)
+        self.add_effect_control(fx, 3, "RGB Shift", self.rgb_shift, "rgb_shift")
+        self.add_effect_control(fx, 4, "Shake", self.shake, "shake")
+        self.add_effect_control(fx, 5, "Ghosting", self.ghosting, "ghosting")
 
         log_f = ttk.LabelFrame(m, text="Engine Log", padding="5"); log_f.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=5)
         self.log_t = tk.Text(log_f, height=8, font=('Consolas', 9)); self.log_t.pack(fill=tk.BOTH, expand=True)
@@ -527,13 +645,132 @@ class GlitchGUI:
         self.root.after(0, self._log_msg_ui, msg)
     def _log_msg_ui(self, msg):
         self.log_t.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n"); self.log_t.see(tk.END)
+    def add_effect_control(self, parent, row, label, enabled_var, amount_name, max_value=2.0):
+        ttk.Checkbutton(parent, text=label, variable=enabled_var).grid(row=row, column=0, sticky="w")
+        ttk.Scale(parent, from_=0.0, to=max_value, variable=self.effect_amounts[amount_name], command=lambda e, name=amount_name: self.update_effect_amount_label(name)).grid(row=row, column=1, sticky="ew", padx=5)
+        self.effect_amount_labels[amount_name] = ttk.Label(parent, text=f"{self.effect_amounts[amount_name].get():.2f}", width=5)
+        self.effect_amount_labels[amount_name].grid(row=row, column=2, sticky="e")
+    def update_effect_amount_label(self, amount_name):
+        self.effect_amount_labels[amount_name].config(text=f"{self.effect_amounts[amount_name].get():.2f}")
+    def update_primary_focus_label(self):
+        if self.primary_focus_label:
+            self.primary_focus_label.config(text=f"{self.primary_focus.get():.2f}")
+    def update_beat_variation_label(self):
+        if self.beat_variation_label:
+            self.beat_variation_label.config(text=f"{self.beat_variation.get():.2f}")
+    def load_styles_file(self):
+        try:
+            with open(STYLE_CONFIG_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except Exception as e:
+            print(f"Could not load styles: {e}")
+            return {}
+    def save_styles_file(self):
+        with open(STYLE_CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(self.styles, f, indent=2, sort_keys=True)
+    def style_names(self):
+        return sorted(name for name in self.styles if name != "_last")
+    def refresh_style_choices(self):
+        names = self.style_names()
+        if self.style_combo:
+            self.style_combo["values"] = names
+        if names and self.style_choice.get() not in names:
+            self.style_choice.set(names[0])
+    def collect_settings(self):
+        return {
+            "export_mode_label": self.export_mode_label.get(),
+            "duration": self.duration.get(),
+            "fps": self.fps.get(),
+            "coherence": self.coherence.get(),
+            "sensitivity": self.sensitivity.get(),
+            "beat_sync": self.beat_sync.get(),
+            "beat_step": self.beat_step.get(),
+            "beat_variation": self.beat_variation.get(),
+            "effects_enabled": {
+                "pixelate": self.pixelate.get(),
+                "flash": self.flash.get(),
+                "rewind": self.rewind.get(),
+                "rgb_shift": self.rgb_shift.get(),
+                "shake": self.shake.get(),
+                "ghosting": self.ghosting.get(),
+            },
+            "effect_amounts": {name: var.get() for name, var in self.effect_amounts.items()},
+            "primary_enabled": self.primary_enabled.get(),
+            "primary_focus": self.primary_focus.get(),
+        }
+    def apply_settings(self, settings):
+        if not isinstance(settings, dict):
+            return
+        if settings.get("export_mode_label") in EXPORT_MODE_LABELS:
+            self.export_mode_label.set(settings["export_mode_label"])
+        self.duration.set(settings.get("duration", self.duration.get()))
+        self.fps.set(settings.get("fps", self.fps.get()))
+        self.coherence.set(settings.get("coherence", self.coherence.get()))
+        self.sensitivity.set(settings.get("sensitivity", self.sensitivity.get()))
+        self.beat_sync.set(settings.get("beat_sync", self.beat_sync.get()))
+        self.beat_step.set(settings.get("beat_step", self.beat_step.get()))
+        self.beat_variation.set(settings.get("beat_variation", self.beat_variation.get()))
+        effects_enabled = settings.get("effects_enabled", {})
+        self.pixelate.set(effects_enabled.get("pixelate", self.pixelate.get()))
+        self.flash.set(effects_enabled.get("flash", self.flash.get()))
+        self.rewind.set(effects_enabled.get("rewind", self.rewind.get()))
+        self.rgb_shift.set(effects_enabled.get("rgb_shift", self.rgb_shift.get()))
+        self.shake.set(effects_enabled.get("shake", self.shake.get()))
+        self.ghosting.set(effects_enabled.get("ghosting", self.ghosting.get()))
+        for name, value in settings.get("effect_amounts", {}).items():
+            if name in self.effect_amounts:
+                self.effect_amounts[name].set(value)
+                self.update_effect_amount_label(name)
+        self.primary_enabled.set(settings.get("primary_enabled", self.primary_enabled.get()))
+        self.primary_focus.set(settings.get("primary_focus", self.primary_focus.get()))
+        self.l_dur.config(text=f"{self.duration.get():.2f}")
+        self.l_coh.config(text=f"{self.coherence.get():.2f}")
+        self.l_sen.config(text=f"{self.sensitivity.get():.2f}")
+        self.update_beat_variation_label()
+        self.update_primary_focus_label()
+    def save_named_style(self):
+        name = self.style_name.get().strip()
+        if not name:
+            return messagebox.showerror("Error", "Style name is required")
+        self.styles[name] = self.collect_settings()
+        try:
+            self.save_styles_file()
+        except Exception as e:
+            return messagebox.showerror("Error", f"Could not save style: {e}")
+        self.refresh_style_choices()
+        self.style_choice.set(name)
+        messagebox.showinfo("Saved", f"Saved style: {name}")
+    def load_named_style(self):
+        name = self.style_choice.get() or self.style_name.get().strip()
+        if name not in self.styles:
+            return messagebox.showerror("Error", "Select a saved style to load")
+        self.apply_settings(self.styles[name])
+        self.style_name.set(name)
+    def save_last_settings(self):
+        self.styles["_last"] = self.collect_settings()
+        try:
+            self.save_styles_file()
+        except Exception as e:
+            self.log_msg(f"Could not save last-used settings: {e}")
     def add_v(self):
         f = filedialog.askopenfilenames(filetypes=[("Video", "*.mp4 *.avi *.mov *.mkv *.webm")])
         for x in f:
-            if x not in self.inputs: self.inputs.append(x); self.lb.insert(tk.END, os.path.basename(x))
+            if x not in self.inputs:
+                self.inputs.append(x); self.lb.insert(tk.END, os.path.basename(x))
+                if len(self.inputs) == 1:
+                    self.primary_video_idx = 0
+                    self.primary_video_label.set(f"Primary: {os.path.basename(x)}")
     def add_a(self):
         f = filedialog.askopenfilename(filetypes=[("Audio", "*.mp3 *.wav *.flac *.m4a")])
         if f: self.audio.set(f)
+    def set_primary_video(self):
+        sel = self.lb.curselection()
+        if not sel: return
+        self.primary_video_idx = sel[0]
+        self.primary_video_label.set(f"Primary: {os.path.basename(self.inputs[self.primary_video_idx])}")
     def update_p(self, curr, total):
         self.root.after(0, self._update_p_ui, curr, total)
     def _update_p_ui(self, curr, total):
@@ -545,12 +782,16 @@ class GlitchGUI:
             if abs(self.last_progress_val - val) >= 0.5: self.pg['value'] = val; self.last_progress_val = val
     def start_p(self):
         if not self.inputs or not self.audio.get(): return messagebox.showerror("Error", "Missing files")
+        self.save_last_settings()
         self.btn.config(state=tk.DISABLED); self.rv_btn.config(state=tk.DISABLED); self.last_progress_val = 0
         threading.Thread(target=self.run_e, daemon=True).start()
     def run_e(self):
         try:
             export_mode = EXPORT_MODE_LABELS[self.export_mode_label.get()]
-            p = GlitchProcessor(self.inputs, self.audio.get(), self.output.get(), self.duration.get(), self.fps.get(), self.pixelate.get(), self.flash.get(), self.rewind.get(), self.rgb_shift.get(), self.shake.get(), self.ghosting.get(), self.beat_sync.get(), self.coherence.get(), self.sensitivity.get(), export_mode, self.update_p, self.log_msg, self.display_frame)
+            effect_amounts = {name: var.get() for name, var in self.effect_amounts.items()}
+            primary_idx = self.primary_video_idx if self.primary_enabled.get() and self.inputs else None
+            primary_focus = self.primary_focus.get() if self.primary_enabled.get() else 0.0
+            p = GlitchProcessor(self.inputs, self.audio.get(), self.output.get(), self.duration.get(), self.fps.get(), self.pixelate.get(), self.flash.get(), self.rewind.get(), self.rgb_shift.get(), self.shake.get(), self.ghosting.get(), self.beat_sync.get(), self.coherence.get(), self.sensitivity.get(), export_mode, self.update_p, self.log_msg, self.display_frame, effect_amounts, primary_idx, primary_focus, self.beat_step.get(), self.beat_variation.get())
             p.process()
             self.root.after(0, self._render_complete_ui, export_mode)
         except Exception as e:
@@ -582,9 +823,11 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--inputs", nargs='+'); p.add_argument("--audio"); p.add_argument("--output", default="output.mp4"); p.add_argument("--beat_sync", action="store_true"); p.add_argument("--gui", action="store_true")
     p.add_argument("--export-mode", choices=[EXPORT_FINAL_VIDEO, EXPORT_CUT_AWARE_MLT, EXPORT_CLIP_MLT], default=EXPORT_FINAL_VIDEO)
+    p.add_argument("--beat-step", type=int, default=1)
+    p.add_argument("--beat-variation", type=float, default=0.0)
     args = p.parse_args()
     if args.gui or not (args.inputs and args.audio):
         r = tk.Tk(); g = GlitchGUI(r); r.mainloop()
     else:
-        proc = GlitchProcessor(args.inputs, args.audio, args.output, beat_sync=args.beat_sync, export_mode=args.export_mode, progress_callback=lambda c, t: print(f"Progress: {c}/{t}", end='\r'))
+        proc = GlitchProcessor(args.inputs, args.audio, args.output, beat_sync=args.beat_sync, export_mode=args.export_mode, progress_callback=lambda c, t: print(f"Progress: {c}/{t}", end='\r'), beat_step=args.beat_step, beat_variation=args.beat_variation)
         proc.process()

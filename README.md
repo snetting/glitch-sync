@@ -11,6 +11,10 @@ Audio-reactive video glitch tool that synchronizes video cuts and visual effects
   - **Ghosting**: Temporal motion blur synced to mids.
   - **Flash**: Brightness bursts on transients.
   - **Rewind**: Stutter/rewind effects on intense peaks.
+- **Per-Effect Amount Controls**: Fine tune each enabled effect independently instead of relying only on on/off toggles.
+- **Beat Interval and Variation**: Cut every N beats during Beat Sync, with optional extra cuts on skipped beats for variety.
+- **Saved Styles**: Save named settings presets and automatically restore the last-used controls on startup.
+- **Optional Primary Focus**: Select one input video as the primary visual source and bias the cut selection toward it while still allowing alternate videos for variation.
 - **Live Render Preview**: Watch the video being built in real-time.
 - **Professional Review**: One-click high-performance preview with full audio sync using `ffplay`.
 - **Source Coherence**: Control how often the engine switches between different source videos.
@@ -22,5 +26,6 @@ Audio-reactive video glitch tool that synchronizes video cuts and visual effects
 ## CLI Export Modes
 
 Use `--export-mode final_video`, `--export-mode cut_aware_mlt`, or `--export-mode clip_mlt`.
+Use `--beat-step 8 --beat-variation 0.2` with `--beat_sync` to make main cuts every 8 beats while allowing occasional extra cuts.
 
 The Shotcut modes create a ZIP archive containing `glitchsync_project.mlt` and relative `media/` files.
