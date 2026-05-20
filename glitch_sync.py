@@ -943,8 +943,8 @@ class GlitchGUI:
         self.root = root
         self.current_project_path = None
         self.root.title("GlitchSync Pro v3.8")
-        self.root.geometry("1180x1180")
-        self.root.minsize(1100, 1100)
+        self.root.geometry("1180x1280")
+        self.root.minsize(1100, 1220)
         self.inputs, self.audio = [], tk.StringVar()
         self.output = tk.StringVar(value=f"glitch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
         self.output_auto_managed = True
