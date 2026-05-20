@@ -17,7 +17,7 @@ Audio-reactive video glitch tool that synchronizes video cuts and visual effects
 - **Duration Control**: When Beat Sync is off, set fixed edit lengths from 0 to 8 seconds.
 - **Output Resolution Presets**: Use the first input's resolution automatically, or override to 480p, 720p, 1080p, 4K, or 8K.
 - **Source Variety**: Bias clip selection toward under-used input videos during a render.
-- **Color Matching and LUTs**: Match clips toward a selected reference video's cached color profile, or apply a user-supplied `.cube` LUT.
+- **Color Matching and LUTs**: Match clips toward a selected reference video's cached color profile with adjustable strength, or apply a user-supplied `.cube` LUT at full strength.
 - **Saved Styles**: Load starter styles and save/delete named settings presets. New sessions and new projects start from the built-in Default style.
 - **Snippet Rendering**: Render a short preview section, such as 30 seconds, before committing to a full export.
 - **Render Abort**: Stop an in-progress render from the main controls.

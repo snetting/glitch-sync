@@ -122,7 +122,7 @@ def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=T
                beat_step=1, beat_variation=0.0, effects_enabled=None,
                effect_amounts=None, primary_enabled=False, primary_focus=0.75,
                export_mode_label="Final video (MP4)", source_variety=0.0,
-               color_match_enabled=False, color_match_strength=0.0):
+               color_match_enabled=False, color_match_strength=0.5):
     return {
         "export_mode_label": export_mode_label,
         "output_resolution_label": "Auto (first input)",
@@ -956,7 +956,7 @@ class GlitchGUI:
         self.source_variety = tk.DoubleVar(value=0.0)
         self.source_variety_label = None
         self.color_match_enabled = tk.BooleanVar(value=False)
-        self.color_match_strength = tk.DoubleVar(value=0.0)
+        self.color_match_strength = tk.DoubleVar(value=0.5)
         self.color_match_strength_label = None
         self.color_reference_idx = 0
         self.color_reference_label = tk.StringVar(value="Reference: first input")
@@ -1077,11 +1077,11 @@ class GlitchGUI:
         color_ref_controls = ttk.Frame(io); color_ref_controls.grid(row=8, column=1, sticky="w", pady=5)
         ttk.Button(color_ref_controls, text="Set Selected", command=self.set_color_reference_video).pack(side=tk.LEFT)
         ttk.Label(color_ref_controls, textvariable=self.color_reference_label).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Label(io, text="Match:").grid(row=9, column=0, sticky="w")
+        ttk.Label(io, text="Ref match:").grid(row=9, column=0, sticky="w")
         color_match_controls = ttk.Frame(io); color_match_controls.grid(row=9, column=1, sticky="ew")
         color_match_controls.columnconfigure(0, weight=1)
         ttk.Scale(color_match_controls, from_=0.0, to=1.0, variable=self.color_match_strength, command=lambda e: self.update_color_match_strength_label()).grid(row=0, column=0, sticky="ew")
-        self.color_match_strength_label = ttk.Label(color_match_controls, text="0.00", width=5); self.color_match_strength_label.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self.color_match_strength_label = ttk.Label(color_match_controls, text="0.50", width=5); self.color_match_strength_label.grid(row=0, column=1, sticky="w", padx=(8, 0))
         ttk.Label(io, text="LUT:").grid(row=10, column=0, sticky="w")
         lut_controls = ttk.Frame(io); lut_controls.grid(row=10, column=1, sticky="ew", pady=5)
         lut_controls.columnconfigure(0, weight=1)
