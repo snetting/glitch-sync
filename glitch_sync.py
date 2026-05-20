@@ -405,9 +405,9 @@ def apply_pixelate(frame, intensity, high_intensity, sensitivity=1.0, probabilit
     small = cv2.resize(frame, (small_w, small_h), interpolation=cv2.INTER_NEAREST)
     return cv2.resize(small, (w, h), interpolation=cv2.INTER_NEAREST)
 
-def apply_brightness_boost(frame, intensity, sensitivity=1.0):
-    if intensity < 0.15: return frame
-    val = int((intensity - 0.15) * sensitivity * 160)
+def apply_flash_boost(frame, intensity, sensitivity=1.0):
+    if intensity <= 0: return frame
+    val = int(np.clip(intensity, 0, 1) * sensitivity * 90)
     return cv2.add(frame, np.full(frame.shape, max(0, val), dtype='uint8'))
 
 def apply_rgb_shift(frame, intensity, sensitivity=1.0):
@@ -762,6 +762,8 @@ class GlitchProcessor:
 
         times = librosa.times_like(rms_energy, sr=sr)
         def get_val(arr, t): return arr[min(np.searchsorted(times, t), len(arr)-1)]
+        def norm_val(arr, max_val, t):
+            return np.clip(float(get_val(arr, t)) / max(max_val, 1e-9), 0, 1)
         
         # Aggressive normalization for punchier effects
         max_rms = float(np.percentile(rms_energy, 99.5))
@@ -804,9 +806,6 @@ class GlitchProcessor:
             num_frames = max(1, int(dur * self.fps))
             
             curr_rms = np.clip(float(get_val(rms_energy, t_start)) / max_rms, 0, 1)
-            curr_bass = np.clip(float(get_val(bass_energy, t_start)) / max_bass, 0, 1)
-            curr_highs = np.clip(float(get_val(highs_energy, t_start)) / max_highs, 0, 1)
-            curr_mids = np.clip(float(get_val(mids_energy, t_start)) / max_mids, 0, 1)
             
             match = self.find_best_match(int(curr_rms * 255), frame_db, self.current_vid_idx, source_use_counts)
             if match:
@@ -835,10 +834,18 @@ class GlitchProcessor:
                     and len(chunk) > 1
                 )
                 pan_x, pan_y = random.uniform(-1, 1), random.uniform(-1, 1)
+                flash_decay_frames = max(3, int(self.fps * 0.12))
+                flash_decay_until = -1
+                flash_peak = 0.0
                 segment_frames = []
                 for frame_idx, f in enumerate(chunk):
                     if self.stop_requested:
                         break
+                    frame_time = t_start + (frame_idx / self.fps)
+                    frame_rms = norm_val(rms_energy, max_rms, frame_time)
+                    frame_bass = norm_val(bass_energy, max_bass, frame_time)
+                    frame_highs = norm_val(highs_energy, max_highs, frame_time)
+                    frame_mids = norm_val(mids_energy, max_mids, frame_time)
                     if f.shape[:2] != (height, width): f = cv2.resize(f, (width, height))
                     if use_static_pan_zoom:
                         progress = frame_idx / max(1, len(chunk) - 1)
@@ -846,15 +853,20 @@ class GlitchProcessor:
                     if reference_stats and self.color_match_strength > 0:
                         f = match_lab_color(f, color_stats.get(self.current_vid_idx), reference_stats, self.color_match_strength)
                     if self.pixelate and pixelate_amount > 0:
-                        f = apply_pixelate(f, curr_rms, curr_highs, self.sensitivity * pixelate_amount, pixelate_amount)
-                    if self.flash and flash_amount > 0:
-                        f = apply_brightness_boost(f, curr_rms, self.sensitivity * flash_amount)
+                        f = apply_pixelate(f, frame_rms, frame_highs, self.sensitivity * pixelate_amount, pixelate_amount)
+                    if self.flash and flash_amount > 0 and frame_highs > 0.55 and frame_rms > 0.25:
+                        new_flash_peak = ((frame_highs - 0.55) / 0.45) * frame_rms
+                        flash_peak = max(flash_peak, new_flash_peak) if frame_idx < flash_decay_until else new_flash_peak
+                        flash_decay_until = frame_idx + flash_decay_frames
+                    if self.flash and flash_amount > 0 and frame_idx < flash_decay_until:
+                        decay = (flash_decay_until - frame_idx) / flash_decay_frames
+                        f = apply_flash_boost(f, flash_peak * decay, self.sensitivity * flash_amount)
                     if self.rgb_shift and rgb_shift_amount > 0:
-                        f = apply_rgb_shift(f, curr_highs, self.sensitivity * rgb_shift_amount)
+                        f = apply_rgb_shift(f, frame_highs, self.sensitivity * rgb_shift_amount)
                     if self.shake and shake_amount > 0:
-                        f = apply_shake(f, curr_bass, self.sensitivity * shake_amount)
+                        f = apply_shake(f, frame_bass, self.sensitivity * shake_amount)
                     if self.ghosting and ghosting_amount > 0:
-                        f = apply_ghosting(f, prev_f, curr_mids, self.sensitivity * ghosting_amount)
+                        f = apply_ghosting(f, prev_f, frame_mids, self.sensitivity * ghosting_amount)
                     if self.lut is not None:
                         f = apply_cube_lut(f, self.lut)
                     out.write(f)
