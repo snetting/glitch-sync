@@ -16,6 +16,7 @@ Audio-reactive video glitch tool that synchronizes video cuts and visual effects
 - **Saved Styles**: Load starter styles, save/delete named settings presets, and automatically restore the last-used controls on startup.
 - **Snippet Rendering**: Render a short preview section, such as 30 seconds, before committing to a full export.
 - **Project Files**: Save and load full project state, including media paths, output path, primary focus selection, style, and unsaved setting tweaks.
+- **Analysis Cache**: Reuses cached input video indexes and audio features between renders, with a File menu option to clear the cache.
 - **Optional Primary Focus**: Select one input video as the primary visual source and bias the cut selection toward it while still allowing alternate videos for variation.
 - **Live Render Preview**: Watch the video being built in real-time.
 - **Professional Review**: One-click high-performance preview with full audio sync using `ffplay`.
@@ -31,3 +32,9 @@ Use `--export-mode final_video`, `--export-mode cut_aware_mlt`, or `--export-mod
 Use `--beat-step 8 --beat-variation 0.2` with `--beat_sync` to make main cuts every 8 beats while allowing occasional extra cuts.
 
 The Shotcut modes create a ZIP archive containing `glitchsync_project.mlt` and relative `media/` files.
+
+## Analysis Cache
+
+GlitchSync stores reusable video and audio analysis data in `~/.cache/glitchsync/analysis`.
+The cache is keyed by source path, file size, modified time, and cache version, so changed source files are re-scanned automatically.
+Use **File > Clear Analysis Cache...** to remove cached analysis files.

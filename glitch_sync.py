@@ -11,6 +11,8 @@ import shutil
 import tempfile
 import zipfile
 import json
+import pickle
+import hashlib
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from tkinter import filedialog, messagebox, ttk
@@ -31,6 +33,25 @@ EXPORT_MODE_LABELS = {
 EFFECT_NAMES = ("pixelate", "flash", "rewind", "rgb_shift", "shake", "ghosting")
 DEFAULT_EFFECT_AMOUNTS = {name: 1.0 for name in EFFECT_NAMES}
 STYLE_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".glitchsync_styles.json")
+ANALYSIS_CACHE_VERSION = "2"
+ANALYSIS_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "glitchsync", "analysis")
+
+
+def file_cache_key(path, kind):
+    stat = os.stat(path)
+    identity = {
+        "version": ANALYSIS_CACHE_VERSION,
+        "kind": kind,
+        "path": os.path.abspath(path),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+    }
+    raw = json.dumps(identity, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def analysis_cache_path(path, kind, extension):
+    return os.path.join(ANALYSIS_CACHE_DIR, kind, f"{file_cache_key(path, kind)}.{extension}")
 
 
 def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=True,
@@ -385,24 +406,112 @@ class GlitchProcessor:
             selected = [beat_times[0], beat_times[-1]]
         return np.array(selected)
 
+    def analyze_video_file(self, path):
+        cache_path = analysis_cache_path(path, "video", "pkl")
+        if os.path.exists(cache_path):
+            try:
+                with open(cache_path, "rb") as f:
+                    buckets = pickle.load(f)
+                if isinstance(buckets, list) and len(buckets) == 256:
+                    self.log(f"  Using cached index for {os.path.basename(path)}")
+                    return buckets
+            except Exception as e:
+                self.log(f"  Ignoring video cache for {os.path.basename(path)}: {e}")
+
+        self.log(f"  Scanning {os.path.basename(path)}...")
+        buckets = [[] for _ in range(256)]
+        cap = cv2.VideoCapture(path)
+        frame_count = 0
+        while not self.stop_requested:
+            ret, frame = cap.read()
+            if not ret: break
+            if self.frame_callback and frame_count % 120 == 0:
+                self.frame_callback(frame)
+            if frame_count % 5 == 0:
+                hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+                b = int(np.mean(hsv[:, :, 2]))
+                buckets[b].append(frame_count)
+            frame_count += 1
+        cap.release()
+
+        if not self.stop_requested:
+            try:
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                with open(cache_path, "wb") as f:
+                    pickle.dump(buckets, f, protocol=pickle.HIGHEST_PROTOCOL)
+                self.log(f"  Cached index for {os.path.basename(path)}")
+            except Exception as e:
+                self.log(f"  Could not save video cache for {os.path.basename(path)}: {e}")
+        return buckets
+
     def analyze_source_videos(self):
         self.log("Indexing video frames...")
         if self.progress_callback: self.progress_callback(-1, -1)
         frame_db = {i: [] for i in range(256)}
         for video_idx, path in enumerate(self.inputs):
-            self.log(f"  Scanning {os.path.basename(path)}...")
-            cap = cv2.VideoCapture(path)
-            frame_count = 0
-            while not self.stop_requested:
-                ret, frame = cap.read()
-                if not ret: break
-                if frame_count % 5 == 0:
-                    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-                    b = int(np.mean(hsv[:, :, 2]))
-                    frame_db[b].append((video_idx, frame_count))
-                frame_count += 1
-            cap.release()
+            buckets = self.analyze_video_file(path)
+            for brightness, frames in enumerate(buckets):
+                frame_db[brightness].extend((video_idx, frame_idx) for frame_idx in frames)
         return frame_db
+
+    def analyze_audio_file(self):
+        cache_path = analysis_cache_path(self.audio, "audio", "npz")
+        if os.path.exists(cache_path):
+            try:
+                cached = np.load(cache_path, allow_pickle=False)
+                self.log(f"Using cached audio analysis for {os.path.basename(self.audio)}")
+                return {
+                    "sr": int(cached["sr"]),
+                    "duration": float(cached["duration"]),
+                    "bass_energy": cached["bass_energy"],
+                    "highs_energy": cached["highs_energy"],
+                    "mids_energy": cached["mids_energy"],
+                    "rms_energy": cached["rms_energy"],
+                    "beats": cached["beats"],
+                    "tempo": float(cached["tempo"]),
+                }
+            except Exception as e:
+                self.log(f"Ignoring audio cache for {os.path.basename(self.audio)}: {e}")
+
+        self.log("Analyzing audio features...")
+        y, sr = librosa.load(self.audio, sr=None)
+        audio_duration = librosa.get_duration(y=y, sr=sr)
+        D = np.abs(librosa.stft(y))
+        freqs = librosa.fft_frequencies(sr=sr)
+        bass_energy = np.mean(D[freqs <= 150, :], axis=0)
+        highs_energy = np.mean(D[freqs >= 5000, :], axis=0)
+        mids_energy = np.mean(D[(freqs > 150) & (freqs < 5000), :], axis=0)
+        rms_energy = librosa.feature.rms(y=y)[0]
+        tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
+        tempo_val = float(tempo) if np.isscalar(tempo) else float(tempo[0])
+
+        try:
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            np.savez_compressed(
+                cache_path,
+                sr=np.array(sr, dtype=np.int64),
+                duration=np.array(audio_duration, dtype=np.float64),
+                bass_energy=bass_energy,
+                highs_energy=highs_energy,
+                mids_energy=mids_energy,
+                rms_energy=rms_energy,
+                beats=beats,
+                tempo=np.array(tempo_val, dtype=np.float64),
+            )
+            self.log(f"Cached audio analysis for {os.path.basename(self.audio)}")
+        except Exception as e:
+            self.log(f"Could not save audio cache for {os.path.basename(self.audio)}: {e}")
+
+        return {
+            "sr": sr,
+            "duration": audio_duration,
+            "bass_energy": bass_energy,
+            "highs_energy": highs_energy,
+            "mids_energy": mids_energy,
+            "rms_energy": rms_energy,
+            "beats": beats,
+            "tempo": tempo_val,
+        }
 
     def find_best_match(self, target_b, frame_db, current_vid_idx):
         search_range = 8
@@ -438,20 +547,17 @@ class GlitchProcessor:
         clip_dir = None
         frame_db = self.analyze_source_videos()
         if self.stop_requested: return
-        self.log("Analyzing audio features...")
-        y, sr = librosa.load(self.audio, sr=None)
-        audio_duration = librosa.get_duration(y=y, sr=sr)
-        D = np.abs(librosa.stft(y))
-        freqs = librosa.fft_frequencies(sr=sr)
-        bass_energy = np.mean(D[freqs <= 150, :], axis=0)
-        highs_energy = np.mean(D[freqs >= 5000, :], axis=0)
-        mids_energy = np.mean(D[(freqs > 150) & (freqs < 5000), :], axis=0)
-        rms_energy = librosa.feature.rms(y=y)[0]
+        audio_features = self.analyze_audio_file()
+        sr = audio_features["sr"]
+        audio_duration = audio_features["duration"]
+        bass_energy = audio_features["bass_energy"]
+        highs_energy = audio_features["highs_energy"]
+        mids_energy = audio_features["mids_energy"]
+        rms_energy = audio_features["rms_energy"]
         
         if self.beat_sync:
-            self.log("Detecting beats...")
-            tempo, beats = librosa.beat.beat_track(y=y, sr=sr)
-            tempo_val = float(tempo) if np.isscalar(tempo) else float(tempo[0])
+            beats = audio_features["beats"]
+            tempo_val = audio_features["tempo"]
             cut_times = self.select_beat_cut_times(beats, sr)
             self.log(f"  Tempo: {tempo_val:.1f} BPM")
             self.log(f"  Beat step: {self.beat_step}; variation: {self.beat_variation:.2f}")
@@ -671,8 +777,22 @@ class GlitchGUI:
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="Save Project...", command=self.save_project)
         file_menu.add_command(label="Load Project...", command=self.load_project)
+        file_menu.add_separator()
+        file_menu.add_command(label="Clear Analysis Cache...", command=self.clear_analysis_cache)
         menubar.add_cascade(label="File", menu=file_menu)
         self.root.config(menu=menubar)
+
+    def clear_analysis_cache(self):
+        if not os.path.exists(ANALYSIS_CACHE_DIR):
+            messagebox.showinfo("Analysis Cache", "No analysis cache exists yet.")
+            return
+        if not messagebox.askyesno("Clear Analysis Cache", "Delete cached video and audio analysis files?"):
+            return
+        try:
+            shutil.rmtree(ANALYSIS_CACHE_DIR)
+            messagebox.showinfo("Analysis Cache", "Analysis cache cleared.")
+        except Exception as e:
+            messagebox.showerror("Analysis Cache", f"Could not clear analysis cache:\n{e}")
 
     def build_ui(self):
         m = ttk.Frame(self.root, padding="15"); m.pack(fill=tk.BOTH, expand=True)
