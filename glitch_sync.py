@@ -1204,8 +1204,8 @@ class GlitchGUI:
             self.style_choice.set(DEFAULT_STYLE_NAME)
         elif names and self.style_choice.get() not in names:
             self.style_choice.set(names[0])
-    def collect_settings(self):
-        return {
+    def collect_settings(self, include_media_refs=False):
+        settings = {
             "export_mode_label": self.export_mode_label.get(),
             "output_resolution_label": self.output_resolution_label.get(),
             "duration": self.duration.get(),
@@ -1217,8 +1217,6 @@ class GlitchGUI:
             "source_variety": self.source_variety.get(),
             "color_match_enabled": self.color_match_enabled.get(),
             "color_match_strength": self.color_match_strength.get(),
-            "color_reference_idx": self.color_reference_idx,
-            "color_reference_label": self.color_reference_label.get(),
             "lut_path": self.lut_path.get(),
             "beat_sync": self.beat_sync.get(),
             "beat_step": self.beat_step.get(),
@@ -1236,6 +1234,10 @@ class GlitchGUI:
             "primary_enabled": self.primary_enabled.get(),
             "primary_focus": self.primary_focus.get(),
         }
+        if include_media_refs:
+            settings["color_reference_idx"] = self.color_reference_idx
+            settings["color_reference_label"] = self.color_reference_label.get()
+        return settings
     def collect_project(self):
         return {
             "version": 1,
@@ -1251,7 +1253,7 @@ class GlitchGUI:
             "lut_path": self.lut_path.get(),
             "style_name": self.style_name.get(),
             "style_choice": self.style_choice.get(),
-            "settings": self.collect_settings(),
+            "settings": self.collect_settings(include_media_refs=True),
         }
     def update_project_title(self):
         if self.current_project_path:
