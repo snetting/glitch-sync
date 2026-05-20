@@ -13,6 +13,7 @@ import zipfile
 import json
 import pickle
 import hashlib
+import bisect
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from tkinter import filedialog, messagebox, ttk
@@ -30,12 +31,13 @@ EXPORT_MODE_LABELS = {
     "Clip Shotcut MLT (ZIP)": EXPORT_CLIP_MLT,
 }
 
-EFFECT_NAMES = ("pixelate", "flash", "rewind", "rgb_shift", "shake", "ghosting")
+EFFECT_NAMES = ("pixelate", "flash", "rewind", "rgb_shift", "shake", "ghosting", "static_pan_zoom")
 DEFAULT_EFFECT_AMOUNTS = {name: 1.0 for name in EFFECT_NAMES}
 DEFAULT_STYLE_NAME = "Default"
 STYLE_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".glitchsync_styles.json")
-ANALYSIS_CACHE_VERSION = "2"
+ANALYSIS_CACHE_VERSION = "3"
 ANALYSIS_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "glitchsync", "analysis")
+STATIC_MOTION_THRESHOLD = 0.018
 
 
 def file_cache_key(path, kind):
@@ -75,6 +77,7 @@ def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=T
             "rgb_shift": True,
             "shake": True,
             "ghosting": True,
+            "static_pan_zoom": False,
             **(effects_enabled or {}),
         },
         "effect_amounts": {
@@ -348,12 +351,24 @@ def apply_ghosting(frame, prev_frame, intensity, sensitivity=1.0):
     alpha = np.clip(0.1 + (intensity * sensitivity * 0.7), 0, 0.97)
     return cv2.addWeighted(frame, 1 - alpha, prev_frame, alpha, 0)
 
+def apply_static_pan_zoom(frame, progress, amount, pan_x, pan_y):
+    h, w = frame.shape[:2]
+    max_zoom = 1.0 + (0.10 * np.clip(amount, 0, 1))
+    zoom = 1.0 + ((max_zoom - 1.0) * np.clip(progress, 0, 1))
+    crop_w, crop_h = max(1, int(w / zoom)), max(1, int(h / zoom))
+    max_x, max_y = max(0, w - crop_w), max(0, h - crop_h)
+    x = int((max_x / 2) + (pan_x * max_x * 0.35 * progress))
+    y = int((max_y / 2) + (pan_y * max_y * 0.35 * progress))
+    x, y = int(np.clip(x, 0, max_x)), int(np.clip(y, 0, max_y))
+    cropped = frame[y:y + crop_h, x:x + crop_w]
+    return cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
+
 # --- Core Logic ---
 
 class GlitchProcessor:
     def __init__(self, inputs, audio, output, duration=0.1, fps=30, 
                  pixelate=False, flash=False, rewind=False, 
-                 rgb_shift=False, shake=False, ghosting=False,
+                 rgb_shift=False, shake=False, ghosting=False, static_pan_zoom=False,
                  beat_sync=False, coherence=0.7, sensitivity=1.0,
                  export_mode=EXPORT_FINAL_VIDEO,
                  progress_callback=None, log_callback=None, frame_callback=None,
@@ -363,6 +378,7 @@ class GlitchProcessor:
         self.duration, self.fps = duration, fps
         self.pixelate, self.flash, self.rewind = pixelate, flash, rewind
         self.rgb_shift, self.shake, self.ghosting = rgb_shift, shake, ghosting
+        self.static_pan_zoom = static_pan_zoom
         self.beat_sync, self.coherence, self.sensitivity = beat_sync, coherence, sensitivity
         self.export_mode = export_mode
         self.beat_step = max(1, int(beat_step))
@@ -413,17 +429,19 @@ class GlitchProcessor:
         if os.path.exists(cache_path):
             try:
                 with open(cache_path, "rb") as f:
-                    buckets = pickle.load(f)
-                if isinstance(buckets, list) and len(buckets) == 256:
+                    cached = pickle.load(f)
+                if isinstance(cached, dict) and isinstance(cached.get("buckets"), list) and len(cached["buckets"]) == 256:
                     self.log(f"  Using cached index for {os.path.basename(path)}")
-                    return buckets
+                    return cached
             except Exception as e:
                 self.log(f"  Ignoring video cache for {os.path.basename(path)}: {e}")
 
         self.log(f"  Scanning {os.path.basename(path)}...")
         buckets = [[] for _ in range(256)]
+        motion_scores = []
         cap = cv2.VideoCapture(path)
         frame_count = 0
+        prev_sample = None
         while not self.stop_requested:
             ret, frame = cap.read()
             if not ret: break
@@ -433,28 +451,41 @@ class GlitchProcessor:
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
                 b = int(np.mean(hsv[:, :, 2]))
                 buckets[b].append(frame_count)
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                sample = cv2.resize(gray, (160, 90), interpolation=cv2.INTER_AREA)
+                motion = 0.0 if prev_sample is None else float(np.mean(cv2.absdiff(sample, prev_sample)) / 255.0)
+                motion_scores.append((frame_count, motion))
+                prev_sample = sample
             frame_count += 1
         cap.release()
+        video_analysis = {"buckets": buckets, "motion_scores": motion_scores}
 
         if not self.stop_requested:
             try:
                 os.makedirs(os.path.dirname(cache_path), exist_ok=True)
                 with open(cache_path, "wb") as f:
-                    pickle.dump(buckets, f, protocol=pickle.HIGHEST_PROTOCOL)
+                    pickle.dump(video_analysis, f, protocol=pickle.HIGHEST_PROTOCOL)
                 self.log(f"  Cached index for {os.path.basename(path)}")
             except Exception as e:
                 self.log(f"  Could not save video cache for {os.path.basename(path)}: {e}")
-        return buckets
+        return video_analysis
 
     def analyze_source_videos(self):
         self.log("Indexing video frames...")
         if self.progress_callback: self.progress_callback(-1, -1)
         frame_db = {i: [] for i in range(256)}
+        motion_db = {}
         for video_idx, path in enumerate(self.inputs):
-            buckets = self.analyze_video_file(path)
+            video_analysis = self.analyze_video_file(path)
+            buckets = video_analysis["buckets"]
+            motion_scores = video_analysis.get("motion_scores", [])
+            motion_db[video_idx] = (
+                [frame for frame, _ in motion_scores],
+                [score for _, score in motion_scores],
+            )
             for brightness, frames in enumerate(buckets):
                 frame_db[brightness].extend((video_idx, frame_idx) for frame_idx in frames)
-        return frame_db
+        return frame_db, motion_db
 
     def analyze_audio_file(self):
         cache_path = analysis_cache_path(self.audio, "audio", "npz")
@@ -544,10 +575,23 @@ class GlitchProcessor:
             offset += 1
         return None
 
+    def segment_motion_score(self, motion_db, video_idx, start_frame, frame_count):
+        frames, scores = motion_db.get(video_idx, ([], []))
+        if not frames:
+            return 1.0
+        end_frame = start_frame + max(1, frame_count)
+        start_pos = bisect.bisect_left(frames, start_frame)
+        end_pos = bisect.bisect_right(frames, end_frame)
+        window = scores[start_pos:end_pos]
+        if not window:
+            nearest_pos = min(range(len(frames)), key=lambda idx: abs(frames[idx] - start_frame))
+            return scores[nearest_pos]
+        return float(np.mean(window))
+
     def process(self):
         package_dir = None
         clip_dir = None
-        frame_db = self.analyze_source_videos()
+        frame_db, motion_db = self.analyze_source_videos()
         if self.stop_requested: return
         audio_features = self.analyze_audio_file()
         sr = audio_features["sr"]
@@ -631,9 +675,21 @@ class GlitchProcessor:
                 rgb_shift_amount = self.effect_amount("rgb_shift")
                 shake_amount = self.effect_amount("shake")
                 ghosting_amount = self.effect_amount("ghosting")
+                static_pan_zoom_amount = self.effect_amount("static_pan_zoom")
+                motion_score = self.segment_motion_score(motion_db, self.current_vid_idx, start_frame, len(chunk))
+                use_static_pan_zoom = (
+                    self.static_pan_zoom
+                    and static_pan_zoom_amount > 0
+                    and motion_score <= STATIC_MOTION_THRESHOLD
+                    and len(chunk) > 1
+                )
+                pan_x, pan_y = random.uniform(-1, 1), random.uniform(-1, 1)
                 segment_frames = []
-                for f in chunk:
+                for frame_idx, f in enumerate(chunk):
                     if f.shape[:2] != (height, width): f = cv2.resize(f, (width, height))
+                    if use_static_pan_zoom:
+                        progress = frame_idx / max(1, len(chunk) - 1)
+                        f = apply_static_pan_zoom(f, progress, static_pan_zoom_amount, pan_x, pan_y)
                     if self.pixelate and pixelate_amount > 0:
                         f = apply_pixelate(f, curr_rms, curr_highs, self.sensitivity * pixelate_amount, pixelate_amount)
                     if self.flash and flash_amount > 0:
@@ -764,6 +820,7 @@ class GlitchGUI:
         self.primary_video_label = tk.StringVar(value="Primary: first input")
         self.beat_sync = tk.BooleanVar(value=True)
         self.pixelate, self.flash, self.rewind, self.rgb_shift, self.shake, self.ghosting = [tk.BooleanVar(value=True) for _ in range(6)]
+        self.static_pan_zoom = tk.BooleanVar(value=False)
         self.style_name = tk.StringVar(value=DEFAULT_STYLE_NAME)
         self.style_choice = tk.StringVar()
         self.style_combo = None
@@ -865,6 +922,7 @@ class GlitchGUI:
         self.add_effect_control(fx, 3, "RGB Shift", self.rgb_shift, "rgb_shift")
         self.add_effect_control(fx, 4, "Shake", self.shake, "shake")
         self.add_effect_control(fx, 5, "Ghosting", self.ghosting, "ghosting")
+        self.add_effect_control(fx, 6, "Static Pan/Zoom", self.static_pan_zoom, "static_pan_zoom", 1.0)
 
         log_f = ttk.LabelFrame(m, text="Engine Log", padding="5"); log_f.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=5)
         self.log_t = tk.Text(log_f, height=8, font=('Consolas', 9)); self.log_t.pack(fill=tk.BOTH, expand=True)
@@ -943,6 +1001,7 @@ class GlitchGUI:
                 "rgb_shift": self.rgb_shift.get(),
                 "shake": self.shake.get(),
                 "ghosting": self.ghosting.get(),
+                "static_pan_zoom": self.static_pan_zoom.get(),
             },
             "effect_amounts": {name: var.get() for name, var in self.effect_amounts.items()},
             "primary_enabled": self.primary_enabled.get(),
@@ -1077,6 +1136,7 @@ class GlitchGUI:
         self.rgb_shift.set(effects_enabled.get("rgb_shift", self.rgb_shift.get()))
         self.shake.set(effects_enabled.get("shake", self.shake.get()))
         self.ghosting.set(effects_enabled.get("ghosting", self.ghosting.get()))
+        self.static_pan_zoom.set(effects_enabled.get("static_pan_zoom", False))
         for name, value in settings.get("effect_amounts", {}).items():
             if name in self.effect_amounts:
                 self.effect_amounts[name].set(value)
@@ -1176,7 +1236,7 @@ class GlitchGUI:
             primary_idx = self.primary_video_idx if self.primary_enabled.get() and self.inputs else None
             primary_focus = self.primary_focus.get() if self.primary_enabled.get() else 0.0
             render_limit = self.snippet_duration.get() if self.render_mode.get() == "Snippet" else None
-            p = GlitchProcessor(self.inputs, self.audio.get(), self.output.get(), self.duration.get(), self.fps.get(), self.pixelate.get(), self.flash.get(), self.rewind.get(), self.rgb_shift.get(), self.shake.get(), self.ghosting.get(), self.beat_sync.get(), self.coherence.get(), self.sensitivity.get(), export_mode, self.update_p, self.log_msg, self.display_frame, effect_amounts, primary_idx, primary_focus, self.beat_step.get(), self.beat_variation.get(), render_limit)
+            p = GlitchProcessor(self.inputs, self.audio.get(), self.output.get(), self.duration.get(), self.fps.get(), self.pixelate.get(), self.flash.get(), self.rewind.get(), self.rgb_shift.get(), self.shake.get(), self.ghosting.get(), self.static_pan_zoom.get(), self.beat_sync.get(), self.coherence.get(), self.sensitivity.get(), export_mode, self.update_p, self.log_msg, self.display_frame, effect_amounts, primary_idx, primary_focus, self.beat_step.get(), self.beat_variation.get(), render_limit)
             p.process()
             self.root.after(0, self._render_complete_ui, export_mode)
         except Exception as e:

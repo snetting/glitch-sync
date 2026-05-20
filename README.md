@@ -9,6 +9,7 @@ Audio-reactive video glitch tool that synchronizes video cuts and visual effects
   - **RGB Shift**: Chromatic aberration synced to audio peaks.
   - **Shake**: Bass-driven camera movement.
   - **Ghosting**: Temporal motion blur synced to mids.
+  - **Static Pan/Zoom**: Optional slow zoom and subtle randomized pan on low-motion source segments.
   - **Flash**: Brightness bursts on transients.
   - **Rewind**: Stutter/rewind effects on intense peaks.
 - **Per-Effect Amount Controls**: Fine tune each enabled effect independently instead of relying only on on/off toggles.
@@ -36,5 +37,5 @@ The Shotcut modes create a ZIP archive containing `glitchsync_project.mlt` and r
 ## Analysis Cache
 
 GlitchSync stores reusable video and audio analysis data in `~/.cache/glitchsync/analysis`.
-The cache is keyed by source path, file size, modified time, and cache version, so changed source files are re-scanned automatically.
+The cache is keyed by source path, file size, modified time, and cache version, so changed source files or analysis upgrades are re-scanned automatically.
 Use **File > Clear Analysis Cache...** to remove cached analysis files.
