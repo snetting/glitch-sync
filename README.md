@@ -20,6 +20,7 @@ Audio-reactive video glitch tool that synchronizes video cuts and visual effects
 - **Color Matching and LUTs**: Match clips toward a selected reference video's cached color profile, or apply a user-supplied `.cube` LUT.
 - **Saved Styles**: Load starter styles and save/delete named settings presets. New sessions and new projects start from the built-in Default style.
 - **Snippet Rendering**: Render a short preview section, such as 30 seconds, before committing to a full export.
+- **Render Abort**: Stop an in-progress render from the main controls.
 - **Project Files**: New, save, save as, and load full project state, including media paths, output path, primary focus selection, style, and unsaved setting tweaks.
 - **Input List Maintenance**: Remove selected input videos or clean missing file references from a loaded project.
 - **Analysis Cache**: Reuses cached input video indexes and audio features between renders, with a File menu option to clear the cache.

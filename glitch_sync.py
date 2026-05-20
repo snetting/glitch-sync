@@ -819,6 +819,8 @@ class GlitchProcessor:
                 pan_x, pan_y = random.uniform(-1, 1), random.uniform(-1, 1)
                 segment_frames = []
                 for frame_idx, f in enumerate(chunk):
+                    if self.stop_requested:
+                        break
                     if f.shape[:2] != (height, width): f = cv2.resize(f, (width, height))
                     if use_static_pan_zoom:
                         progress = frame_idx / max(1, len(chunk) - 1)
@@ -842,8 +844,8 @@ class GlitchProcessor:
                         segment_frames.append(f)
                     prev_f = f.copy()
 
-                if chunk:
-                    frame_count = len(chunk)
+                if chunk and not self.stop_requested:
+                    frame_count = len(segment_frames) if self.export_mode == EXPORT_CLIP_MLT else len(chunk)
                     segment = {
                         "timeline_in": rendered_frames,
                         "timeline_out": rendered_frames + frame_count - 1,
@@ -882,7 +884,11 @@ class GlitchProcessor:
                 self.export_shotcut_archive(temp_video, segments, width, height, package_dir)
         if os.path.exists(temp_video): os.remove(temp_video)
         if package_dir and os.path.exists(package_dir): shutil.rmtree(package_dir)
+        if self.stop_requested:
+            self.log("Stopped.")
+            return False
         self.log("Done!")
+        return True
 
     def export_final_video(self, temp_video):
         root, ext = os.path.splitext(self.output)
@@ -975,6 +981,8 @@ class GlitchGUI:
         self.style_combo = None
         self.styles = self.load_styles_file()
         self.last_progress_val = 0
+        self.active_processor = None
+        self.render_was_stopped = False
         self.build_menu()
         self.build_ui()
         self.refresh_style_choices()
@@ -1016,14 +1024,6 @@ class GlitchGUI:
         file_menu.add_separator()
         file_menu.add_command(label="Clear Analysis Cache...", command=self.clear_analysis_cache)
         menubar.add_cascade(label="File", menu=file_menu)
-
-        color_menu = tk.Menu(menubar, tearoff=0)
-        color_menu.add_checkbutton(label="Enable Color Match", variable=self.color_match_enabled)
-        color_menu.add_command(label="Set Selected Input as Reference", command=self.set_color_reference_video)
-        color_menu.add_separator()
-        color_menu.add_command(label="Choose LUT...", command=self.pick_lut)
-        color_menu.add_command(label="Clear LUT", command=self.clear_lut)
-        menubar.add_cascade(label="Color", menu=color_menu)
         self.root.config(menu=menubar)
 
     def clear_analysis_cache(self):
@@ -1043,6 +1043,7 @@ class GlitchGUI:
         m.columnconfigure(0, weight=1); m.columnconfigure(1, weight=1)
         
         io = ttk.LabelFrame(m, text="Files", padding="10"); io.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
+        io.columnconfigure(1, weight=1)
         ttk.Label(io, text="Inputs:").grid(row=0, column=0, sticky="nw")
         self.lb = tk.Listbox(io, height=5, selectmode=tk.EXTENDED); self.lb.grid(row=0, column=1, sticky="ew", padx=5)
         input_buttons = ttk.Frame(io); input_buttons.grid(row=0, column=2, sticky="n")
@@ -1059,19 +1060,34 @@ class GlitchGUI:
         ttk.Label(io, text="Out:").grid(row=4, column=0)
         ttk.Entry(io, textvariable=self.output).grid(row=4, column=1, sticky="ew")
         ttk.Label(io, text="Render length:").grid(row=5, column=0, sticky="w")
-        ttk.Combobox(io, textvariable=self.render_mode, values=["Full", "Snippet"], state="readonly", width=10).grid(row=5, column=1, sticky="w", pady=5)
-        ttk.Spinbox(io, from_=1, to=3600, textvariable=self.snippet_duration, width=7).grid(row=5, column=2, sticky="w")
+        render_length_controls = ttk.Frame(io); render_length_controls.grid(row=5, column=1, sticky="w", pady=5)
+        ttk.Combobox(render_length_controls, textvariable=self.render_mode, values=["Full", "Snippet"], state="readonly", width=10).pack(side=tk.LEFT)
+        ttk.Spinbox(render_length_controls, from_=1, to=3600, textvariable=self.snippet_duration, width=7).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(render_length_controls, text="sec").pack(side=tk.LEFT, padx=(4, 0))
         ttk.Checkbutton(io, text="Primary focus", variable=self.primary_enabled).grid(row=6, column=0, sticky="w")
-        ttk.Button(io, text="Set Selected", command=self.set_primary_video).grid(row=6, column=1, sticky="w", pady=5)
-        ttk.Label(io, textvariable=self.primary_video_label).grid(row=6, column=2, sticky="w")
+        primary_controls = ttk.Frame(io); primary_controls.grid(row=6, column=1, sticky="w", pady=5)
+        ttk.Button(primary_controls, text="Set Selected", command=self.set_primary_video).pack(side=tk.LEFT)
+        ttk.Label(primary_controls, textvariable=self.primary_video_label).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Label(io, text="Focus:").grid(row=7, column=0, sticky="w")
-        ttk.Scale(io, from_=0.0, to=1.0, variable=self.primary_focus, command=lambda e: self.update_primary_focus_label()).grid(row=7, column=1, sticky="ew")
-        self.primary_focus_label = ttk.Label(io, text="0.75"); self.primary_focus_label.grid(row=7, column=2, sticky="w")
-        ttk.Label(io, text="Color ref:").grid(row=8, column=0, sticky="w")
-        ttk.Label(io, textvariable=self.color_reference_label).grid(row=8, column=1, sticky="w")
+        primary_focus_controls = ttk.Frame(io); primary_focus_controls.grid(row=7, column=1, sticky="ew")
+        primary_focus_controls.columnconfigure(0, weight=1)
+        ttk.Scale(primary_focus_controls, from_=0.0, to=1.0, variable=self.primary_focus, command=lambda e: self.update_primary_focus_label()).grid(row=0, column=0, sticky="ew")
+        self.primary_focus_label = ttk.Label(primary_focus_controls, text="0.75", width=5); self.primary_focus_label.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Checkbutton(io, text="Color match", variable=self.color_match_enabled).grid(row=8, column=0, sticky="w")
+        color_ref_controls = ttk.Frame(io); color_ref_controls.grid(row=8, column=1, sticky="w", pady=5)
+        ttk.Button(color_ref_controls, text="Set Selected", command=self.set_color_reference_video).pack(side=tk.LEFT)
+        ttk.Label(color_ref_controls, textvariable=self.color_reference_label).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Label(io, text="Match:").grid(row=9, column=0, sticky="w")
-        ttk.Scale(io, from_=0.0, to=1.0, variable=self.color_match_strength, command=lambda e: self.update_color_match_strength_label()).grid(row=9, column=1, sticky="ew")
-        self.color_match_strength_label = ttk.Label(io, text="0.00"); self.color_match_strength_label.grid(row=9, column=2, sticky="w")
+        color_match_controls = ttk.Frame(io); color_match_controls.grid(row=9, column=1, sticky="ew")
+        color_match_controls.columnconfigure(0, weight=1)
+        ttk.Scale(color_match_controls, from_=0.0, to=1.0, variable=self.color_match_strength, command=lambda e: self.update_color_match_strength_label()).grid(row=0, column=0, sticky="ew")
+        self.color_match_strength_label = ttk.Label(color_match_controls, text="0.00", width=5); self.color_match_strength_label.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Label(io, text="LUT:").grid(row=10, column=0, sticky="w")
+        lut_controls = ttk.Frame(io); lut_controls.grid(row=10, column=1, sticky="ew", pady=5)
+        lut_controls.columnconfigure(0, weight=1)
+        ttk.Entry(lut_controls, textvariable=self.lut_path).grid(row=0, column=0, sticky="ew")
+        ttk.Button(lut_controls, text="...", command=self.pick_lut, width=3).grid(row=0, column=1, padx=(5, 0))
+        ttk.Button(lut_controls, text="Clear", command=self.clear_lut).grid(row=0, column=2, padx=(5, 0))
 
         pv = ttk.LabelFrame(m, text="Live Preview & Review", padding="10"); pv.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
         self.cv = tk.Canvas(pv, width=480, height=270, bg="black"); self.cv.pack(pady=5)
@@ -1123,7 +1139,11 @@ class GlitchGUI:
         log_f = ttk.LabelFrame(m, text="Engine Log", padding="5"); log_f.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=5)
         self.log_t = tk.Text(log_f, height=8, font=('Consolas', 9)); self.log_t.pack(fill=tk.BOTH, expand=True)
         self.pg = ttk.Progressbar(m, orient=tk.HORIZONTAL, mode='determinate'); self.pg.grid(row=3, column=0, columnspan=2, sticky="ew", pady=5)
-        self.btn = ttk.Button(m, text="RENDER", command=self.start_p); self.btn.grid(row=4, column=0, columnspan=2, sticky="ew", pady=10)
+        render_buttons = ttk.Frame(m); render_buttons.grid(row=4, column=0, columnspan=2, sticky="ew", pady=10)
+        render_buttons.columnconfigure(0, weight=1)
+        render_buttons.columnconfigure(1, weight=0)
+        self.btn = ttk.Button(render_buttons, text="RENDER", command=self.start_p); self.btn.grid(row=0, column=0, sticky="ew")
+        self.stop_btn = ttk.Button(render_buttons, text="STOP", command=self.stop_render, state=tk.DISABLED); self.stop_btn.grid(row=0, column=1, sticky="e", padx=(8, 0))
 
     def log_msg(self, msg):
         self.root.after(0, self._log_msg_ui, msg)
@@ -1261,6 +1281,7 @@ class GlitchGUI:
         default_settings["snippet_duration"] = 30.0
         self.apply_settings(default_settings)
         self.btn.config(state=tk.NORMAL)
+        self.stop_btn.config(state=tk.DISABLED)
         self.rv_btn.config(state=tk.DISABLED)
         self.pg.stop()
         self.pg.config(mode='determinate')
@@ -1510,8 +1531,15 @@ class GlitchGUI:
     def start_p(self):
         if not self.inputs or not self.audio.get(): return messagebox.showerror("Error", "Missing files")
         self.save_last_settings()
-        self.btn.config(state=tk.DISABLED); self.rv_btn.config(state=tk.DISABLED); self.last_progress_val = 0
+        self.render_was_stopped = False
+        self.btn.config(state=tk.DISABLED); self.stop_btn.config(state=tk.NORMAL); self.rv_btn.config(state=tk.DISABLED); self.last_progress_val = 0
         threading.Thread(target=self.run_e, daemon=True).start()
+    def stop_render(self):
+        self.render_was_stopped = True
+        if self.active_processor:
+            self.active_processor.stop_requested = True
+        self.stop_btn.config(state=tk.DISABLED)
+        self.log_msg("Stop requested; finishing current operation...")
     def run_e(self):
         try:
             export_mode = EXPORT_MODE_LABELS[self.export_mode_label.get()]
@@ -1523,12 +1551,19 @@ class GlitchGUI:
             render_limit = self.snippet_duration.get() if self.render_mode.get() == "Snippet" else None
             output_resolution = OUTPUT_RESOLUTION_LABELS.get(self.output_resolution_label.get())
             p = GlitchProcessor(self.inputs, self.audio.get(), self.output.get(), self.duration.get(), self.fps.get(), self.pixelate.get(), self.flash.get(), self.rewind.get(), self.rgb_shift.get(), self.shake.get(), self.ghosting.get(), self.static_pan_zoom.get(), self.beat_sync.get(), self.coherence.get(), self.sensitivity.get(), export_mode, self.update_p, self.log_msg, self.display_frame, effect_amounts, primary_idx, primary_focus, self.beat_step.get(), self.beat_variation.get(), render_limit, self.source_variety.get(), color_reference_idx, color_match_strength, self.lut_path.get().strip(), output_resolution)
-            p.process()
-            self.root.after(0, self._render_complete_ui, export_mode)
+            self.active_processor = p
+            if self.render_was_stopped:
+                p.stop_requested = True
+            completed = p.process()
+            if completed:
+                self.root.after(0, self._render_complete_ui, export_mode)
+            else:
+                self.root.after(0, self._render_stopped_ui)
         except Exception as e:
             self.log_msg(f"ERROR: {e}")
             self.root.after(0, self._render_error_ui, str(e))
         finally:
+            self.active_processor = None
             self.root.after(0, self._render_finished_ui)
     def _render_complete_ui(self, export_mode):
         if export_mode == EXPORT_FINAL_VIDEO:
@@ -1536,8 +1571,10 @@ class GlitchGUI:
         messagebox.showinfo("Success", "Complete!")
     def _render_error_ui(self, error):
         messagebox.showerror("Error", error)
+    def _render_stopped_ui(self):
+        messagebox.showinfo("Stopped", "Render stopped.")
     def _render_finished_ui(self):
-        self.pg.stop(); self.pg.config(mode='determinate'); self.btn.config(state=tk.NORMAL); self.pg['value'] = 0
+        self.pg.stop(); self.pg.config(mode='determinate'); self.btn.config(state=tk.NORMAL); self.stop_btn.config(state=tk.DISABLED); self.pg['value'] = 0
     def display_frame(self, f):
         h, w = f.shape[:2]; s = min(480/w, 270/h); nw, nh = int(w*s), int(h*s)
         img = Image.fromarray(cv2.cvtColor(f, cv2.COLOR_BGR2RGB)).resize((nw, nh), Image.LANCZOS)
