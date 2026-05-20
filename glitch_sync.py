@@ -32,6 +32,7 @@ EXPORT_MODE_LABELS = {
 
 EFFECT_NAMES = ("pixelate", "flash", "rewind", "rgb_shift", "shake", "ghosting")
 DEFAULT_EFFECT_AMOUNTS = {name: 1.0 for name in EFFECT_NAMES}
+DEFAULT_STYLE_NAME = "Default"
 STYLE_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".glitchsync_styles.json")
 ANALYSIS_CACHE_VERSION = "2"
 ANALYSIS_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "glitchsync", "analysis")
@@ -86,6 +87,7 @@ def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=T
 
 
 BUILTIN_STYLES = {
+    DEFAULT_STYLE_NAME: make_style(),
     "Mellow Story": make_style(
         duration=0.8,
         coherence=0.85,
@@ -762,7 +764,7 @@ class GlitchGUI:
         self.primary_video_label = tk.StringVar(value="Primary: first input")
         self.beat_sync = tk.BooleanVar(value=True)
         self.pixelate, self.flash, self.rewind, self.rgb_shift, self.shake, self.ghosting = [tk.BooleanVar(value=True) for _ in range(6)]
-        self.style_name = tk.StringVar(value="Default")
+        self.style_name = tk.StringVar(value=DEFAULT_STYLE_NAME)
         self.style_choice = tk.StringVar()
         self.style_combo = None
         self.styles = self.load_styles_file()
@@ -770,8 +772,6 @@ class GlitchGUI:
         self.build_menu()
         self.build_ui()
         self.refresh_style_choices()
-        if "_last" in self.styles:
-            self.apply_settings(self.styles["_last"])
 
     def build_menu(self):
         menubar = tk.Menu(self.root)
@@ -901,19 +901,28 @@ class GlitchGUI:
         return self.with_builtin_styles(styles)
     def with_builtin_styles(self, styles):
         deleted = set(styles.get("_deleted_builtin_styles", []))
-        merged = json.loads(json.dumps({name: style for name, style in BUILTIN_STYLES.items() if name not in deleted}))
+        merged = json.loads(json.dumps({
+            name: style for name, style in BUILTIN_STYLES.items()
+            if name == DEFAULT_STYLE_NAME or name not in deleted
+        }))
         merged.update(styles)
+        merged[DEFAULT_STYLE_NAME] = json.loads(json.dumps(BUILTIN_STYLES[DEFAULT_STYLE_NAME]))
         return merged
     def save_styles_file(self):
         with open(STYLE_CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(self.styles, f, indent=2, sort_keys=True)
     def style_names(self):
-        return sorted(name for name in self.styles if not name.startswith("_"))
+        names = sorted(name for name in self.styles if not name.startswith("_") and name != DEFAULT_STYLE_NAME)
+        if DEFAULT_STYLE_NAME in self.styles:
+            return [DEFAULT_STYLE_NAME, *names]
+        return names
     def refresh_style_choices(self):
         names = self.style_names()
         if self.style_combo:
             self.style_combo["values"] = names
-        if names and self.style_choice.get() not in names:
+        if DEFAULT_STYLE_NAME in names and not self.style_choice.get():
+            self.style_choice.set(DEFAULT_STYLE_NAME)
+        elif names and self.style_choice.get() not in names:
             self.style_choice.set(names[0])
     def collect_settings(self):
         return {
@@ -965,8 +974,10 @@ class GlitchGUI:
         self.output.set(f"glitch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
         self.primary_video_idx = 0
         self.primary_video_label.set("Primary: first input")
-        self.style_name.set("Default")
-        if self.style_names():
+        self.style_name.set(DEFAULT_STYLE_NAME)
+        if DEFAULT_STYLE_NAME in self.styles:
+            self.style_choice.set(DEFAULT_STYLE_NAME)
+        elif self.style_names():
             self.style_choice.set(self.style_names()[0])
         default_settings = make_style()
         default_settings["render_mode"] = "Full"
@@ -1081,6 +1092,8 @@ class GlitchGUI:
         name = self.style_name.get().strip()
         if not name:
             return messagebox.showerror("Error", "Style name is required")
+        if name == DEFAULT_STYLE_NAME:
+            return messagebox.showerror("Error", "The default style cannot be overwritten")
         if name in BUILTIN_STYLES and name in self.styles.get("_deleted_builtin_styles", []):
             self.styles["_deleted_builtin_styles"].remove(name)
         self.styles[name] = self.collect_settings()
@@ -1103,6 +1116,8 @@ class GlitchGUI:
             return messagebox.showerror("Error", "Select a saved style to delete")
         if name == "_last":
             return messagebox.showerror("Error", "The automatic last-used style cannot be deleted")
+        if name == DEFAULT_STYLE_NAME:
+            return messagebox.showerror("Error", "The default style cannot be deleted")
         if not messagebox.askyesno("Delete Style", f"Delete style '{name}'?"):
             return
         if name in BUILTIN_STYLES:

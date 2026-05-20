@@ -13,7 +13,7 @@ Audio-reactive video glitch tool that synchronizes video cuts and visual effects
   - **Rewind**: Stutter/rewind effects on intense peaks.
 - **Per-Effect Amount Controls**: Fine tune each enabled effect independently instead of relying only on on/off toggles.
 - **Beat Interval and Variation**: Cut every N beats during Beat Sync, with optional extra cuts on skipped beats for variety.
-- **Saved Styles**: Load starter styles, save/delete named settings presets, and automatically restore the last-used controls on startup.
+- **Saved Styles**: Load starter styles and save/delete named settings presets. New sessions and new projects start from the built-in Default style.
 - **Snippet Rendering**: Render a short preview section, such as 30 seconds, before committing to a full export.
 - **Project Files**: New, save, save as, and load full project state, including media paths, output path, primary focus selection, style, and unsaved setting tweaks.
 - **Analysis Cache**: Reuses cached input video indexes and audio features between renders, with a File menu option to clear the cache.
