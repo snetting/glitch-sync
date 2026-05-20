@@ -524,7 +524,9 @@ class GlitchGUI:
         self.btn = ttk.Button(m, text="RENDER", command=self.start_p); self.btn.grid(row=4, column=0, columnspan=2, sticky="ew", pady=10)
 
     def log_msg(self, msg):
-        self.log_t.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n"); self.log_t.see(tk.END); self.root.update_idletasks()
+        self.root.after(0, self._log_msg_ui, msg)
+    def _log_msg_ui(self, msg):
+        self.log_t.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n"); self.log_t.see(tk.END)
     def add_v(self):
         f = filedialog.askopenfilenames(filetypes=[("Video", "*.mp4 *.avi *.mov *.mkv *.webm")])
         for x in f:
@@ -533,13 +535,14 @@ class GlitchGUI:
         f = filedialog.askopenfilename(filetypes=[("Audio", "*.mp3 *.wav *.flac *.m4a")])
         if f: self.audio.set(f)
     def update_p(self, curr, total):
+        self.root.after(0, self._update_p_ui, curr, total)
+    def _update_p_ui(self, curr, total):
         if curr == -1:
             if self.pg['mode'] != 'indeterminate': self.pg.config(mode='indeterminate'); self.pg.start(10)
         else:
             if self.pg['mode'] != 'determinate': self.pg.stop(); self.pg.config(mode='determinate')
             val = (curr / total) * 100
             if abs(self.last_progress_val - val) >= 0.5: self.pg['value'] = val; self.last_progress_val = val
-        self.root.update_idletasks()
     def start_p(self):
         if not self.inputs or not self.audio.get(): return messagebox.showerror("Error", "Missing files")
         self.btn.config(state=tk.DISABLED); self.rv_btn.config(state=tk.DISABLED); self.last_progress_val = 0
@@ -549,11 +552,20 @@ class GlitchGUI:
             export_mode = EXPORT_MODE_LABELS[self.export_mode_label.get()]
             p = GlitchProcessor(self.inputs, self.audio.get(), self.output.get(), self.duration.get(), self.fps.get(), self.pixelate.get(), self.flash.get(), self.rewind.get(), self.rgb_shift.get(), self.shake.get(), self.ghosting.get(), self.beat_sync.get(), self.coherence.get(), self.sensitivity.get(), export_mode, self.update_p, self.log_msg, self.display_frame)
             p.process()
-            if export_mode == EXPORT_FINAL_VIDEO:
-                self.root.after(0, lambda: self.rv_btn.config(state=tk.NORMAL))
-            messagebox.showinfo("Success", "Complete!")
-        except Exception as e: self.log_msg(f"ERROR: {e}"); messagebox.showerror("Error", str(e))
-        finally: self.pg.stop(); self.pg.config(mode='determinate'); self.btn.config(state=tk.NORMAL); self.pg['value'] = 0
+            self.root.after(0, self._render_complete_ui, export_mode)
+        except Exception as e:
+            self.log_msg(f"ERROR: {e}")
+            self.root.after(0, self._render_error_ui, str(e))
+        finally:
+            self.root.after(0, self._render_finished_ui)
+    def _render_complete_ui(self, export_mode):
+        if export_mode == EXPORT_FINAL_VIDEO:
+            self.rv_btn.config(state=tk.NORMAL)
+        messagebox.showinfo("Success", "Complete!")
+    def _render_error_ui(self, error):
+        messagebox.showerror("Error", error)
+    def _render_finished_ui(self):
+        self.pg.stop(); self.pg.config(mode='determinate'); self.btn.config(state=tk.NORMAL); self.pg['value'] = 0
     def display_frame(self, f):
         h, w = f.shape[:2]; s = min(480/w, 270/h); nw, nh = int(w*s), int(h*s)
         img = Image.fromarray(cv2.cvtColor(f, cv2.COLOR_BGR2RGB)).resize((nw, nh), Image.LANCZOS)
