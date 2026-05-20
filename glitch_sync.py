@@ -941,6 +941,9 @@ class GlitchGUI:
         self.root.minsize(1100, 1100)
         self.inputs, self.audio = [], tk.StringVar()
         self.output = tk.StringVar(value=f"glitch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
+        self.output_auto_managed = True
+        self.suppress_output_trace = False
+        self.output.trace_add("write", self.on_output_changed)
         self.export_mode_label = tk.StringVar(value="Final video (MP4)")
         self.output_resolution_label = tk.StringVar(value="Auto (first input)")
         self.duration, self.fps, self.coherence, self.sensitivity = tk.DoubleVar(value=0.10), tk.IntVar(value=30), tk.DoubleVar(value=0.20), tk.DoubleVar(value=1.0)
@@ -975,6 +978,32 @@ class GlitchGUI:
         self.build_menu()
         self.build_ui()
         self.refresh_style_choices()
+
+    def on_output_changed(self, *args):
+        if not self.suppress_output_trace:
+            self.output_auto_managed = False
+
+    def set_output(self, value, auto_managed=None):
+        self.suppress_output_trace = True
+        try:
+            self.output.set(value)
+        finally:
+            self.suppress_output_trace = False
+        if auto_managed is not None:
+            self.output_auto_managed = auto_managed
+
+    def default_output_for_project(self, project_path):
+        folder = os.path.dirname(project_path)
+        name = os.path.basename(project_path)
+        if name.endswith(".glitchsync.json"):
+            stem = name[:-len(".glitchsync.json")]
+        else:
+            stem = os.path.splitext(name)[0]
+        return os.path.join(folder, f"{stem}.mp4")
+
+    def sync_auto_output_to_project(self, project_path):
+        if self.output_auto_managed:
+            self.set_output(self.default_output_for_project(project_path), True)
 
     def build_menu(self):
         menubar = tk.Menu(self.root)
@@ -1193,6 +1222,7 @@ class GlitchGUI:
             "inputs": self.inputs,
             "audio": self.audio.get(),
             "output": self.output.get(),
+            "output_auto_managed": self.output_auto_managed,
             "output_resolution_label": self.output_resolution_label.get(),
             "primary_video_idx": self.primary_video_idx,
             "primary_video_label": self.primary_video_label.get(),
@@ -1214,7 +1244,7 @@ class GlitchGUI:
         self.inputs = []
         self.lb.delete(0, tk.END)
         self.audio.set("")
-        self.output.set(f"glitch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
+        self.set_output(f"glitch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4", True)
         self.output_resolution_label.set("Auto (first input)")
         self.primary_video_idx = 0
         self.primary_video_label.set("Primary: first input")
@@ -1249,7 +1279,7 @@ class GlitchGUI:
             raise ValueError("Invalid project file")
         self.set_inputs(list(project.get("inputs", [])), int(project.get("primary_video_idx", 0) or 0))
         self.audio.set(project.get("audio", ""))
-        self.output.set(project.get("output", self.output.get()))
+        self.set_output(project.get("output", self.output.get()), bool(project.get("output_auto_managed", False)))
         if project.get("output_resolution_label") in OUTPUT_RESOLUTION_LABELS:
             self.output_resolution_label.set(project["output_resolution_label"])
         self.color_reference_idx = int(project.get("color_reference_idx", 0) or 0)
@@ -1262,6 +1292,7 @@ class GlitchGUI:
             self.style_choice.set(project["style_choice"])
         self.apply_settings(project.get("settings", {}))
     def write_project(self, path):
+        self.sync_auto_output_to_project(path)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.collect_project(), f, indent=2, sort_keys=True)
         self.current_project_path = path
