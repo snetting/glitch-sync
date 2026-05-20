@@ -740,6 +740,7 @@ class GlitchProcessor:
 class GlitchGUI:
     def __init__(self, root):
         self.root = root
+        self.current_project_path = None
         self.root.title("GlitchSync Pro v3.8")
         self.root.geometry("1180x1120")
         self.root.minsize(1100, 1050)
@@ -775,8 +776,11 @@ class GlitchGUI:
     def build_menu(self):
         menubar = tk.Menu(self.root)
         file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="Save Project...", command=self.save_project)
+        file_menu.add_command(label="New", command=self.new_project)
         file_menu.add_command(label="Load Project...", command=self.load_project)
+        file_menu.add_separator()
+        file_menu.add_command(label="Save", command=self.save_project)
+        file_menu.add_command(label="Save As...", command=self.save_project_as)
         file_menu.add_separator()
         file_menu.add_command(label="Clear Analysis Cache...", command=self.clear_analysis_cache)
         menubar.add_cascade(label="File", menu=file_menu)
@@ -947,6 +951,41 @@ class GlitchGUI:
             "style_choice": self.style_choice.get(),
             "settings": self.collect_settings(),
         }
+    def update_project_title(self):
+        if self.current_project_path:
+            name = os.path.basename(self.current_project_path)
+            self.root.title(f"GlitchSync Pro v3.8 - {name}")
+        else:
+            self.root.title("GlitchSync Pro v3.8")
+    def reset_project_state(self):
+        self.current_project_path = None
+        self.inputs = []
+        self.lb.delete(0, tk.END)
+        self.audio.set("")
+        self.output.set(f"glitch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
+        self.primary_video_idx = 0
+        self.primary_video_label.set("Primary: first input")
+        self.style_name.set("Default")
+        if self.style_names():
+            self.style_choice.set(self.style_names()[0])
+        default_settings = make_style()
+        default_settings["render_mode"] = "Full"
+        default_settings["snippet_duration"] = 30.0
+        self.apply_settings(default_settings)
+        self.btn.config(state=tk.NORMAL)
+        self.rv_btn.config(state=tk.DISABLED)
+        self.pg.stop()
+        self.pg.config(mode='determinate')
+        self.pg['value'] = 0
+        self.last_progress_val = 0
+        self.cv.delete("all")
+        self.log_t.delete("1.0", tk.END)
+        self.update_project_title()
+    def new_project(self):
+        has_project_data = bool(self.current_project_path or self.inputs or self.audio.get())
+        if has_project_data and not messagebox.askyesno("New Project", "Start a new project and clear the current setup?"):
+            return
+        self.reset_project_state()
     def apply_project(self, project):
         if not isinstance(project, dict):
             raise ValueError("Invalid project file")
@@ -967,7 +1006,20 @@ class GlitchGUI:
         if project.get("style_choice"):
             self.style_choice.set(project["style_choice"])
         self.apply_settings(project.get("settings", {}))
+    def write_project(self, path):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.collect_project(), f, indent=2, sort_keys=True)
+        self.current_project_path = path
+        self.update_project_title()
     def save_project(self):
+        if not self.current_project_path:
+            return self.save_project_as()
+        try:
+            self.write_project(self.current_project_path)
+        except Exception as e:
+            return messagebox.showerror("Error", f"Could not save project: {e}")
+        messagebox.showinfo("Saved", f"Saved project: {os.path.basename(self.current_project_path)}")
+    def save_project_as(self):
         path = filedialog.asksaveasfilename(
             defaultextension=".glitchsync.json",
             filetypes=[("GlitchSync Project", "*.glitchsync.json"), ("JSON", "*.json")],
@@ -975,8 +1027,7 @@ class GlitchGUI:
         if not path:
             return
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump(self.collect_project(), f, indent=2, sort_keys=True)
+            self.write_project(path)
         except Exception as e:
             return messagebox.showerror("Error", f"Could not save project: {e}")
         messagebox.showinfo("Saved", f"Saved project: {os.path.basename(path)}")
@@ -988,6 +1039,8 @@ class GlitchGUI:
             with open(path, "r", encoding="utf-8") as f:
                 project = json.load(f)
             self.apply_project(project)
+            self.current_project_path = path
+            self.update_project_title()
         except Exception as e:
             return messagebox.showerror("Error", f"Could not load project: {e}")
         messagebox.showinfo("Loaded", f"Loaded project: {os.path.basename(path)}")

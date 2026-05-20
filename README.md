@@ -15,7 +15,7 @@ Audio-reactive video glitch tool that synchronizes video cuts and visual effects
 - **Beat Interval and Variation**: Cut every N beats during Beat Sync, with optional extra cuts on skipped beats for variety.
 - **Saved Styles**: Load starter styles, save/delete named settings presets, and automatically restore the last-used controls on startup.
 - **Snippet Rendering**: Render a short preview section, such as 30 seconds, before committing to a full export.
-- **Project Files**: Save and load full project state, including media paths, output path, primary focus selection, style, and unsaved setting tweaks.
+- **Project Files**: New, save, save as, and load full project state, including media paths, output path, primary focus selection, style, and unsaved setting tweaks.
 - **Analysis Cache**: Reuses cached input video indexes and audio features between renders, with a File menu option to clear the cache.
 - **Optional Primary Focus**: Select one input video as the primary visual source and bias the cut selection toward it while still allowing alternate videos for variation.
 - **Live Render Preview**: Watch the video being built in real-time.
