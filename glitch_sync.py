@@ -31,6 +31,15 @@ EXPORT_MODE_LABELS = {
     "Clip Shotcut MLT (ZIP)": EXPORT_CLIP_MLT,
 }
 
+OUTPUT_RESOLUTION_LABELS = {
+    "Auto (first input)": None,
+    "480p (854x480)": (854, 480),
+    "720p HD (1280x720)": (1280, 720),
+    "1080p Full HD (1920x1080)": (1920, 1080),
+    "4K UHD (3840x2160)": (3840, 2160),
+    "8K UHD (7680x4320)": (7680, 4320),
+}
+
 EFFECT_NAMES = ("pixelate", "flash", "rewind", "rgb_shift", "shake", "ghosting", "static_pan_zoom")
 DEFAULT_EFFECT_AMOUNTS = {name: 1.0 for name in EFFECT_NAMES}
 DEFAULT_STYLE_NAME = "Default"
@@ -116,6 +125,7 @@ def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=T
                color_match_enabled=False, color_match_strength=0.0):
     return {
         "export_mode_label": export_mode_label,
+        "output_resolution_label": "Auto (first input)",
         "duration": duration,
         "fps": fps,
         "coherence": coherence,
@@ -431,7 +441,7 @@ class GlitchProcessor:
                  effect_amounts=None, primary_video_idx=None, primary_focus=0.0,
                  beat_step=1, beat_variation=0.0, render_limit=None,
                  source_variety=0.0, color_reference_idx=None, color_match_strength=0.0,
-                 lut_path=""):
+                 lut_path="", output_resolution=None):
         self.inputs, self.audio, self.output = inputs, audio, output
         self.duration, self.fps = duration, fps
         self.pixelate, self.flash, self.rewind = pixelate, flash, rewind
@@ -447,6 +457,7 @@ class GlitchProcessor:
         self.color_match_strength = np.clip(float(color_match_strength), 0, 1)
         self.lut_path = lut_path
         self.lut = None
+        self.output_resolution = output_resolution
         self.effect_amounts = DEFAULT_EFFECT_AMOUNTS.copy()
         if effect_amounts:
             for name in EFFECT_NAMES:
@@ -743,7 +754,12 @@ class GlitchProcessor:
         cap = cv2.VideoCapture(self.inputs[0])
         _, first_frame = cap.read()
         cap.release()
-        height, width = first_frame.shape[:2]
+        source_height, source_width = first_frame.shape[:2]
+        if self.output_resolution:
+            width, height = self.output_resolution
+        else:
+            width, height = source_width, source_height
+        self.log(f"  Output resolution: {width}x{height}")
         temp_video = f"temp_{random.randint(1000, 9999)}.avi"
         out = cv2.VideoWriter(temp_video, cv2.VideoWriter_fourcc(*'XVID'), self.fps, (width, height))
         caps, prev_f = [cv2.VideoCapture(f) for f in self.inputs], None
@@ -926,6 +942,7 @@ class GlitchGUI:
         self.inputs, self.audio = [], tk.StringVar()
         self.output = tk.StringVar(value=f"glitch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
         self.export_mode_label = tk.StringVar(value="Final video (MP4)")
+        self.output_resolution_label = tk.StringVar(value="Auto (first input)")
         self.duration, self.fps, self.coherence, self.sensitivity = tk.DoubleVar(value=0.10), tk.IntVar(value=30), tk.DoubleVar(value=0.20), tk.DoubleVar(value=1.0)
         self.source_variety = tk.DoubleVar(value=0.0)
         self.source_variety_label = None
@@ -970,6 +987,14 @@ class GlitchGUI:
         file_menu.add_separator()
         file_menu.add_command(label="Clear Analysis Cache...", command=self.clear_analysis_cache)
         menubar.add_cascade(label="File", menu=file_menu)
+
+        color_menu = tk.Menu(menubar, tearoff=0)
+        color_menu.add_checkbutton(label="Enable Color Match", variable=self.color_match_enabled)
+        color_menu.add_command(label="Set Selected Input as Reference", command=self.set_color_reference_video)
+        color_menu.add_separator()
+        color_menu.add_command(label="Choose LUT...", command=self.pick_lut)
+        color_menu.add_command(label="Clear LUT", command=self.clear_lut)
+        menubar.add_cascade(label="Color", menu=color_menu)
         self.root.config(menu=menubar)
 
     def clear_analysis_cache(self):
@@ -1000,26 +1025,24 @@ class GlitchGUI:
         ttk.Button(io, text="...", command=self.add_a).grid(row=1, column=2)
         ttk.Label(io, text="Export:").grid(row=2, column=0)
         ttk.Combobox(io, textvariable=self.export_mode_label, values=list(EXPORT_MODE_LABELS.keys()), state="readonly").grid(row=2, column=1, sticky="ew")
-        ttk.Label(io, text="Out:").grid(row=3, column=0)
-        ttk.Entry(io, textvariable=self.output).grid(row=3, column=1, sticky="ew")
-        ttk.Label(io, text="Render length:").grid(row=4, column=0, sticky="w")
-        ttk.Combobox(io, textvariable=self.render_mode, values=["Full", "Snippet"], state="readonly", width=10).grid(row=4, column=1, sticky="w", pady=5)
-        ttk.Spinbox(io, from_=1, to=3600, textvariable=self.snippet_duration, width=7).grid(row=4, column=2, sticky="w")
-        ttk.Checkbutton(io, text="Primary focus", variable=self.primary_enabled).grid(row=5, column=0, sticky="w")
-        ttk.Button(io, text="Set Selected", command=self.set_primary_video).grid(row=5, column=1, sticky="w", pady=5)
-        ttk.Label(io, textvariable=self.primary_video_label).grid(row=5, column=2, sticky="w")
-        ttk.Label(io, text="Focus:").grid(row=6, column=0, sticky="w")
-        ttk.Scale(io, from_=0.0, to=1.0, variable=self.primary_focus, command=lambda e: self.update_primary_focus_label()).grid(row=6, column=1, sticky="ew")
-        self.primary_focus_label = ttk.Label(io, text="0.75"); self.primary_focus_label.grid(row=6, column=2, sticky="w")
-        ttk.Checkbutton(io, text="Color match", variable=self.color_match_enabled).grid(row=7, column=0, sticky="w")
-        ttk.Button(io, text="Set Color Ref", command=self.set_color_reference_video).grid(row=7, column=1, sticky="w", pady=5)
-        ttk.Label(io, textvariable=self.color_reference_label).grid(row=7, column=2, sticky="w")
-        ttk.Label(io, text="Match:").grid(row=8, column=0, sticky="w")
-        ttk.Scale(io, from_=0.0, to=1.0, variable=self.color_match_strength, command=lambda e: self.update_color_match_strength_label()).grid(row=8, column=1, sticky="ew")
-        self.color_match_strength_label = ttk.Label(io, text="0.00"); self.color_match_strength_label.grid(row=8, column=2, sticky="w")
-        ttk.Label(io, text="LUT:").grid(row=9, column=0, sticky="w")
-        ttk.Entry(io, textvariable=self.lut_path).grid(row=9, column=1, sticky="ew")
-        ttk.Button(io, text="...", command=self.pick_lut).grid(row=9, column=2)
+        ttk.Label(io, text="Resolution:").grid(row=3, column=0)
+        ttk.Combobox(io, textvariable=self.output_resolution_label, values=list(OUTPUT_RESOLUTION_LABELS.keys()), state="readonly").grid(row=3, column=1, sticky="ew")
+        ttk.Label(io, text="Out:").grid(row=4, column=0)
+        ttk.Entry(io, textvariable=self.output).grid(row=4, column=1, sticky="ew")
+        ttk.Label(io, text="Render length:").grid(row=5, column=0, sticky="w")
+        ttk.Combobox(io, textvariable=self.render_mode, values=["Full", "Snippet"], state="readonly", width=10).grid(row=5, column=1, sticky="w", pady=5)
+        ttk.Spinbox(io, from_=1, to=3600, textvariable=self.snippet_duration, width=7).grid(row=5, column=2, sticky="w")
+        ttk.Checkbutton(io, text="Primary focus", variable=self.primary_enabled).grid(row=6, column=0, sticky="w")
+        ttk.Button(io, text="Set Selected", command=self.set_primary_video).grid(row=6, column=1, sticky="w", pady=5)
+        ttk.Label(io, textvariable=self.primary_video_label).grid(row=6, column=2, sticky="w")
+        ttk.Label(io, text="Focus:").grid(row=7, column=0, sticky="w")
+        ttk.Scale(io, from_=0.0, to=1.0, variable=self.primary_focus, command=lambda e: self.update_primary_focus_label()).grid(row=7, column=1, sticky="ew")
+        self.primary_focus_label = ttk.Label(io, text="0.75"); self.primary_focus_label.grid(row=7, column=2, sticky="w")
+        ttk.Label(io, text="Color ref:").grid(row=8, column=0, sticky="w")
+        ttk.Label(io, textvariable=self.color_reference_label).grid(row=8, column=1, sticky="w")
+        ttk.Label(io, text="Match:").grid(row=9, column=0, sticky="w")
+        ttk.Scale(io, from_=0.0, to=1.0, variable=self.color_match_strength, command=lambda e: self.update_color_match_strength_label()).grid(row=9, column=1, sticky="ew")
+        self.color_match_strength_label = ttk.Label(io, text="0.00"); self.color_match_strength_label.grid(row=9, column=2, sticky="w")
 
         pv = ttk.LabelFrame(m, text="Live Preview & Review", padding="10"); pv.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
         self.cv = tk.Canvas(pv, width=480, height=270, bg="black"); self.cv.pack(pady=5)
@@ -1135,6 +1158,7 @@ class GlitchGUI:
     def collect_settings(self):
         return {
             "export_mode_label": self.export_mode_label.get(),
+            "output_resolution_label": self.output_resolution_label.get(),
             "duration": self.duration.get(),
             "fps": self.fps.get(),
             "render_mode": self.render_mode.get(),
@@ -1169,6 +1193,7 @@ class GlitchGUI:
             "inputs": self.inputs,
             "audio": self.audio.get(),
             "output": self.output.get(),
+            "output_resolution_label": self.output_resolution_label.get(),
             "primary_video_idx": self.primary_video_idx,
             "primary_video_label": self.primary_video_label.get(),
             "color_reference_idx": self.color_reference_idx,
@@ -1190,6 +1215,7 @@ class GlitchGUI:
         self.lb.delete(0, tk.END)
         self.audio.set("")
         self.output.set(f"glitch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
+        self.output_resolution_label.set("Auto (first input)")
         self.primary_video_idx = 0
         self.primary_video_label.set("Primary: first input")
         self.color_reference_idx = 0
@@ -1224,6 +1250,8 @@ class GlitchGUI:
         self.set_inputs(list(project.get("inputs", [])), int(project.get("primary_video_idx", 0) or 0))
         self.audio.set(project.get("audio", ""))
         self.output.set(project.get("output", self.output.get()))
+        if project.get("output_resolution_label") in OUTPUT_RESOLUTION_LABELS:
+            self.output_resolution_label.set(project["output_resolution_label"])
         self.color_reference_idx = int(project.get("color_reference_idx", 0) or 0)
         self.update_color_reference_label(project.get("color_reference_label", "Reference: first input"))
         self.lut_path.set(project.get("lut_path", self.lut_path.get()))
@@ -1276,6 +1304,8 @@ class GlitchGUI:
             return
         if settings.get("export_mode_label") in EXPORT_MODE_LABELS:
             self.export_mode_label.set(settings["export_mode_label"])
+        if settings.get("output_resolution_label") in OUTPUT_RESOLUTION_LABELS:
+            self.output_resolution_label.set(settings["output_resolution_label"])
         self.duration.set(settings.get("duration", self.duration.get()))
         self.fps.set(settings.get("fps", self.fps.get()))
         if settings.get("render_mode") in ("Full", "Snippet"):
@@ -1435,6 +1465,8 @@ class GlitchGUI:
         path = filedialog.askopenfilename(filetypes=[("Cube LUT", "*.cube"), ("All files", "*.*")])
         if path:
             self.lut_path.set(path)
+    def clear_lut(self):
+        self.lut_path.set("")
     def update_p(self, curr, total):
         self.root.after(0, self._update_p_ui, curr, total)
     def _update_p_ui(self, curr, total):
@@ -1458,7 +1490,8 @@ class GlitchGUI:
             color_reference_idx = self.color_reference_idx if self.color_match_enabled.get() and self.inputs else None
             color_match_strength = self.color_match_strength.get() if self.color_match_enabled.get() else 0.0
             render_limit = self.snippet_duration.get() if self.render_mode.get() == "Snippet" else None
-            p = GlitchProcessor(self.inputs, self.audio.get(), self.output.get(), self.duration.get(), self.fps.get(), self.pixelate.get(), self.flash.get(), self.rewind.get(), self.rgb_shift.get(), self.shake.get(), self.ghosting.get(), self.static_pan_zoom.get(), self.beat_sync.get(), self.coherence.get(), self.sensitivity.get(), export_mode, self.update_p, self.log_msg, self.display_frame, effect_amounts, primary_idx, primary_focus, self.beat_step.get(), self.beat_variation.get(), render_limit, self.source_variety.get(), color_reference_idx, color_match_strength, self.lut_path.get().strip())
+            output_resolution = OUTPUT_RESOLUTION_LABELS.get(self.output_resolution_label.get())
+            p = GlitchProcessor(self.inputs, self.audio.get(), self.output.get(), self.duration.get(), self.fps.get(), self.pixelate.get(), self.flash.get(), self.rewind.get(), self.rgb_shift.get(), self.shake.get(), self.ghosting.get(), self.static_pan_zoom.get(), self.beat_sync.get(), self.coherence.get(), self.sensitivity.get(), export_mode, self.update_p, self.log_msg, self.display_frame, effect_amounts, primary_idx, primary_focus, self.beat_step.get(), self.beat_variation.get(), render_limit, self.source_variety.get(), color_reference_idx, color_match_strength, self.lut_path.get().strip(), output_resolution)
             p.process()
             self.root.after(0, self._render_complete_ui, export_mode)
         except Exception as e:

@@ -15,6 +15,7 @@ Audio-reactive video glitch tool that synchronizes video cuts and visual effects
 - **Per-Effect Amount Controls**: Fine tune each enabled effect independently instead of relying only on on/off toggles.
 - **Beat Interval and Variation**: Cut every N beats during Beat Sync, with optional extra cuts on skipped beats for variety.
 - **Duration Control**: When Beat Sync is off, set fixed edit lengths from 0 to 8 seconds.
+- **Output Resolution Presets**: Use the first input's resolution automatically, or override to 480p, 720p, 1080p, 4K, or 8K.
 - **Source Variety**: Bias clip selection toward under-used input videos during a render.
 - **Color Matching and LUTs**: Match clips toward a selected reference video's cached color profile, or apply a user-supplied `.cube` LUT.
 - **Saved Styles**: Load starter styles and save/delete named settings presets. New sessions and new projects start from the built-in Default style.
