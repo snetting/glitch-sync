@@ -609,9 +609,9 @@ class GlitchProcessor:
             self.log(f"  Beat step: {self.beat_step}; variation: {self.beat_variation:.2f}")
             if len(cut_times) < 2:
                 self.log("  Not enough beats detected; falling back to duration cuts.")
-                cut_times = np.arange(0, audio_duration, self.duration)
+                cut_times = np.arange(0, audio_duration, max(0.01, self.duration))
         else:
-            cut_times = np.arange(0, audio_duration, self.duration)
+            cut_times = np.arange(0, audio_duration, max(0.01, self.duration))
 
         render_duration = audio_duration
         if self.render_limit:
@@ -895,8 +895,8 @@ class GlitchGUI:
         ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.beat_variation, command=lambda e: self.update_beat_variation_label()).grid(row=2, column=1, sticky="ew")
         self.beat_variation_label = ttk.Label(set_f, text="0.00"); self.beat_variation_label.grid(row=2, column=2)
         ttk.Label(set_f, text="Duration (no Beat Sync):").grid(row=3, column=0)
-        ttk.Scale(set_f, from_=0.01, to=1.0, variable=self.duration, command=lambda e: self.l_dur.config(text=f"{self.duration.get():.2f}")).grid(row=3, column=1, sticky="ew")
-        self.l_dur = ttk.Label(set_f, text="0.10"); self.l_dur.grid(row=3, column=2)
+        ttk.Scale(set_f, from_=0.0, to=8.0, variable=self.duration, command=lambda e: self.l_dur.config(text=f"{self.duration.get():.2f}s")).grid(row=3, column=1, sticky="ew")
+        self.l_dur = ttk.Label(set_f, text="0.10s"); self.l_dur.grid(row=3, column=2)
         ttk.Label(set_f, text="Coherence:").grid(row=4, column=0)
         ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.coherence, command=lambda e: self.l_coh.config(text=f"{self.coherence.get():.2f}")).grid(row=4, column=1, sticky="ew")
         self.l_coh = ttk.Label(set_f, text="0.20"); self.l_coh.grid(row=4, column=2)
@@ -1143,7 +1143,7 @@ class GlitchGUI:
                 self.update_effect_amount_label(name)
         self.primary_enabled.set(settings.get("primary_enabled", self.primary_enabled.get()))
         self.primary_focus.set(settings.get("primary_focus", self.primary_focus.get()))
-        self.l_dur.config(text=f"{self.duration.get():.2f}")
+        self.l_dur.config(text=f"{self.duration.get():.2f}s")
         self.l_coh.config(text=f"{self.coherence.get():.2f}")
         self.l_sen.config(text=f"{self.sensitivity.get():.2f}")
         self.update_beat_variation_label()
