@@ -140,6 +140,7 @@ def apply_cube_lut(frame, lut):
 
 
 def fit_frame_to_output(frame, width, height):
+    frame = crop_dark_edges(frame)
     src_h, src_w = frame.shape[:2]
     if src_w == width and src_h == height:
         return frame
@@ -153,6 +154,35 @@ def fit_frame_to_output(frame, width, height):
     if fitted.shape[:2] != (height, width):
         fitted = cv2.resize(fitted, (width, height), interpolation=cv2.INTER_LINEAR)
     return fitted
+
+
+def crop_dark_edges(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    threshold = max(8, int(np.percentile(gray, 15) * 0.6))
+    mask = gray > threshold
+    rows = np.where(np.mean(mask, axis=1) > 0.12)[0]
+    cols = np.where(np.mean(mask, axis=0) > 0.12)[0]
+    if rows.size < 2 or cols.size < 2:
+        return frame
+    y1, y2 = rows[0], rows[-1] + 1
+    x1, x2 = cols[0], cols[-1] + 1
+    h, w = frame.shape[:2]
+    if (y2 - y1) < h * 0.55 or (x2 - x1) < w * 0.55:
+        return frame
+    if y1 == 0 and y2 == h and x1 == 0 and x2 == w:
+        return frame
+    return frame[y1:y2, x1:x2]
+
+
+def apply_center_zoom(frame, zoom):
+    if zoom <= 1.001:
+        return frame
+    h, w = frame.shape[:2]
+    crop_w = max(1, int(w / zoom))
+    crop_h = max(1, int(h / zoom))
+    x = (w - crop_w) // 2
+    y = (h - crop_h) // 2
+    return cv2.resize(frame[y:y + crop_h, x:x + crop_w], (w, h), interpolation=cv2.INTER_LINEAR)
 
 
 def match_lab_color(frame, source_stats, reference_stats, strength):
@@ -1087,6 +1117,12 @@ class GlitchProcessor:
                     and motion_score <= STATIC_MOTION_THRESHOLD
                     and len(chunk) > 1
                 )
+                transform_overscan = 1.0
+                if use_static_pan_zoom:
+                    transform_overscan += 0.10 * np.clip(static_pan_zoom_amount, 0, 1)
+                if self.shake and shake_amount > 0:
+                    max_shake_offset = max(0, (1.0 - 0.2) * self.sensitivity * shake_amount * 60)
+                    transform_overscan += min(0.12, (max_shake_offset * 2) / max(width, height))
                 pan_x, pan_y = random.uniform(-1, 1), random.uniform(-1, 1)
                 flash_decay_frames = max(3, int(self.fps * 0.12))
                 flash_decay_until = -1
@@ -1111,6 +1147,7 @@ class GlitchProcessor:
                     hue_shift_highs = frame_highs if hue_shift_frame_timing else clip_highs
                     vignette_bass = frame_bass if vignette_frame_timing else clip_bass
                     f = fit_frame_to_output(f, width, height)
+                    f = apply_center_zoom(f, transform_overscan)
                     if use_static_pan_zoom:
                         progress = frame_idx / max(1, len(chunk) - 1)
                         f = apply_static_pan_zoom(f, progress, static_pan_zoom_amount, pan_x, pan_y)
