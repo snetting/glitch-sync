@@ -41,12 +41,16 @@ OUTPUT_RESOLUTION_LABELS = {
 }
 
 EXPORT_QUALITY_LABELS = {
+    "Master quality (largest)": ("slow", "18"),
     "High quality (slower)": ("medium", "21"),
     "Balanced": ("fast", "22"),
     "Fast preview": ("veryfast", "24"),
 }
 
-EFFECT_NAMES = ("pixelate", "flash", "rewind", "rgb_shift", "shake", "ghosting", "static_pan_zoom")
+EFFECT_NAMES = (
+    "pixelate", "flash", "rewind", "rgb_shift", "shake", "ghosting",
+    "monochrome", "hue_shift", "vignette", "static_pan_zoom",
+)
 DEFAULT_EFFECT_AMOUNTS = {name: 1.0 for name in EFFECT_NAMES}
 EFFECT_TIMING_LABELS = ("Frame", "Clip")
 DEFAULT_EFFECT_TIMING = {
@@ -56,6 +60,9 @@ DEFAULT_EFFECT_TIMING = {
     "rgb_shift": "Frame",
     "shake": "Frame",
     "ghosting": "Frame",
+    "monochrome": "Frame",
+    "hue_shift": "Frame",
+    "vignette": "Frame",
     "static_pan_zoom": "Clip",
 }
 DEFAULT_STYLE_NAME = "Default"
@@ -138,7 +145,7 @@ def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=T
                beat_step=1, beat_variation=0.0, effects_enabled=None,
                effect_amounts=None, effect_timing=None,
                primary_enabled=False, primary_focus=0.75,
-               export_mode_label="Final video (MP4)", source_variety=0.0,
+               export_mode_label="Final video (MP4)", source_variety=0.0, music_match=0.0,
                color_match_enabled=False, color_match_strength=0.5,
                output_resolution_label="Auto (first input)",
                export_quality_label="High quality (slower)", render_mode="Full",
@@ -154,6 +161,7 @@ def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=T
         "coherence": coherence,
         "sensitivity": sensitivity,
         "source_variety": source_variety,
+        "music_match": music_match,
         "color_match_enabled": color_match_enabled,
         "color_match_strength": color_match_strength,
         "lut_path": lut_path,
@@ -167,6 +175,9 @@ def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=T
             "rgb_shift": True,
             "shake": True,
             "ghosting": True,
+            "monochrome": False,
+            "hue_shift": False,
+            "vignette": False,
             "static_pan_zoom": False,
             **(effects_enabled or {}),
         },
@@ -190,6 +201,7 @@ BUILTIN_STYLES = {
         coherence=0.85,
         sensitivity=0.55,
         source_variety=0.35,
+        music_match=0.25,
         color_match_strength=0.55,
         beat_step=8,
         beat_variation=0.12,
@@ -201,6 +213,7 @@ BUILTIN_STYLES = {
         coherence=0.65,
         sensitivity=0.9,
         source_variety=0.55,
+        music_match=0.45,
         color_match_strength=0.5,
         beat_step=4,
         beat_variation=0.25,
@@ -210,6 +223,7 @@ BUILTIN_STYLES = {
         coherence=0.35,
         sensitivity=1.35,
         source_variety=0.7,
+        music_match=0.7,
         color_match_strength=0.45,
         beat_step=2,
         beat_variation=0.45,
@@ -219,6 +233,7 @@ BUILTIN_STYLES = {
         coherence=0.5,
         sensitivity=1.15,
         source_variety=0.6,
+        music_match=0.65,
         color_match_strength=0.45,
         beat_step=2,
         beat_variation=0.25,
@@ -229,6 +244,7 @@ BUILTIN_STYLES = {
         coherence=0.95,
         sensitivity=0.4,
         source_variety=0.25,
+        music_match=0.2,
         color_match_strength=0.6,
         beat_step=16,
         beat_variation=0.05,
@@ -240,6 +256,7 @@ BUILTIN_STYLES = {
         coherence=0.15,
         sensitivity=1.75,
         source_variety=0.8,
+        music_match=0.75,
         color_match_strength=0.35,
         beat_step=1,
         beat_variation=0.0,
@@ -458,6 +475,38 @@ def apply_ghosting(frame, prev_frame, intensity, sensitivity=1.0):
     alpha = np.clip(0.1 + (intensity * sensitivity * 0.7), 0, 0.97)
     return cv2.addWeighted(frame, 1 - alpha, prev_frame, alpha, 0)
 
+def apply_monochrome(frame, intensity, sensitivity=1.0, amount=1.0):
+    if intensity < 0.35:
+        return frame
+    blend = np.clip(((intensity - 0.35) / 0.65) * sensitivity * amount, 0, 1)
+    if blend <= 0:
+        return frame
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    gray_bgr = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    return cv2.addWeighted(frame, 1 - blend, gray_bgr, blend, 0)
+
+def apply_hue_shift(frame, intensity, sensitivity=1.0, amount=1.0):
+    if intensity < 0.25:
+        return frame
+    shift = int(np.clip((intensity - 0.25) * sensitivity * amount * 70, -90, 90))
+    if abs(shift) < 1:
+        return frame
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    hsv[:, :, 0] = ((hsv[:, :, 0].astype(np.int16) + shift) % 180).astype(np.uint8)
+    return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+def apply_vignette(frame, intensity, sensitivity=1.0, amount=1.0):
+    if intensity < 0.2:
+        return frame
+    strength = np.clip((intensity - 0.2) * sensitivity * amount, 0, 1)
+    if strength <= 0:
+        return frame
+    h, w = frame.shape[:2]
+    y, x = np.ogrid[-1:1:h * 1j, -1:1:w * 1j]
+    distance = np.clip(np.sqrt((x * x) + (y * y)), 0, 1)
+    mask = 1.0 - (distance ** 1.7 * 0.65 * strength)
+    return np.clip(frame.astype(np.float32) * mask[:, :, None], 0, 255).astype(np.uint8)
+
 def apply_static_pan_zoom(frame, progress, amount, pan_x, pan_y):
     h, w = frame.shape[:2]
     max_zoom = 1.0 + (0.10 * np.clip(amount, 0, 1))
@@ -474,14 +523,16 @@ def apply_static_pan_zoom(frame, progress, amount, pan_x, pan_y):
 
 class GlitchProcessor:
     def __init__(self, inputs, audio, output, duration=0.1, fps=30, 
-                 pixelate=False, flash=False, rewind=False, 
-                 rgb_shift=False, shake=False, ghosting=False, static_pan_zoom=False,
+                 pixelate=False, flash=False, rewind=False,
+                 rgb_shift=False, shake=False, ghosting=False,
+                 static_pan_zoom=False, monochrome=False, hue_shift=False, vignette=False,
                  beat_sync=False, coherence=0.7, sensitivity=1.0,
                  export_mode=EXPORT_FINAL_VIDEO,
                  progress_callback=None, log_callback=None, frame_callback=None,
                  effect_amounts=None, primary_video_idx=None, primary_focus=0.0,
                  beat_step=1, beat_variation=0.0, render_limit=None,
-                 source_variety=0.0, color_reference_idx=None, color_match_strength=0.0,
+                 source_variety=0.0, music_match=0.0,
+                 color_reference_idx=None, color_match_strength=0.0,
                  lut_path="", output_resolution=None, export_quality_label="High quality (slower)",
                  effect_timing=None):
         self.inputs, self.audio, self.output = inputs, audio, output
@@ -489,12 +540,14 @@ class GlitchProcessor:
         self.pixelate, self.flash, self.rewind = pixelate, flash, rewind
         self.rgb_shift, self.shake, self.ghosting = rgb_shift, shake, ghosting
         self.static_pan_zoom = static_pan_zoom
+        self.monochrome, self.hue_shift, self.vignette = monochrome, hue_shift, vignette
         self.beat_sync, self.coherence, self.sensitivity = beat_sync, coherence, sensitivity
         self.export_mode = export_mode
         self.beat_step = max(1, int(beat_step))
         self.beat_variation = np.clip(float(beat_variation), 0, 1)
         self.render_limit = float(render_limit) if render_limit else None
         self.source_variety = np.clip(float(source_variety), 0, 1)
+        self.music_match = np.clip(float(music_match), 0, 1)
         self.color_reference_idx = color_reference_idx if color_reference_idx is not None else None
         self.color_match_strength = np.clip(float(color_match_strength), 0, 1)
         self.lut_path = lut_path
@@ -532,17 +585,40 @@ class GlitchProcessor:
             EXPORT_QUALITY_LABELS["High quality (slower)"],
         )
 
-    def choose_candidate(self, candidates, source_use_counts=None):
+    def choose_candidate(self, candidates, source_use_counts=None, motion_db=None,
+                         target_motion=None, frame_count=1, motion_scale=1.0):
         if not candidates:
             return None
-        if not source_use_counts or self.source_variety <= 0:
+        use_variety = bool(source_use_counts) and self.source_variety > 0
+        use_motion = (
+            motion_db is not None
+            and target_motion is not None
+            and self.music_match > 0
+            and motion_scale > 0
+        )
+        if not use_variety and not use_motion:
             return random.choice(candidates)
         max_count = max(source_use_counts) if source_use_counts else 0
-        weights = [
-            ((max_count + 1) / (source_use_counts[v_idx] + 1)) ** (1 + (self.source_variety * 4))
-            for v_idx, _ in candidates
-        ]
+        weights = []
+        for v_idx, f_idx in candidates:
+            weight = 1.0
+            if use_variety:
+                weight *= ((max_count + 1) / (source_use_counts[v_idx] + 1)) ** (1 + (self.source_variety * 4))
+            if use_motion:
+                motion = self.segment_motion_score(motion_db, v_idx, f_idx, frame_count)
+                motion_norm = np.clip(motion / motion_scale, 0, 1)
+                closeness = 1.0 - abs(motion_norm - target_motion)
+                weight *= max(0.05, 1.0 + (self.music_match * 5.0 * closeness))
+            weights.append(weight)
         return random.choices(candidates, weights=weights, k=1)[0]
+
+    def motion_scale(self, motion_db):
+        scores = []
+        for _, source_scores in motion_db.values():
+            scores.extend(source_scores)
+        if not scores:
+            return 1.0
+        return max(float(np.percentile(scores, 95)), STATIC_MOTION_THRESHOLD, 1e-6)
 
     def use_primary_video(self):
         return (
@@ -716,7 +792,8 @@ class GlitchProcessor:
             "tempo": tempo_val,
         }
 
-    def find_best_match(self, target_b, frame_db, current_vid_idx, source_use_counts=None):
+    def find_best_match(self, target_b, frame_db, current_vid_idx, source_use_counts=None,
+                        motion_db=None, target_motion=None, frame_count=1, motion_scale=1.0):
         search_range = 8
         candidates_current, candidates_other, candidates_primary = [], [], []
         for b in range(max(0, target_b - search_range), min(255, target_b + search_range) + 1):
@@ -726,10 +803,11 @@ class GlitchProcessor:
                 if v_idx == current_vid_idx: candidates_current.append((v_idx, f_idx))
                 else: candidates_other.append((v_idx, f_idx))
         if candidates_primary and random.random() < self.primary_focus:
-            return self.choose_candidate(candidates_primary, source_use_counts)
+            return self.choose_candidate(candidates_primary, source_use_counts, motion_db, target_motion, frame_count, motion_scale)
         if candidates_current and (random.random() < self.coherence or not candidates_other):
-            return self.choose_candidate(candidates_current, source_use_counts)
-        if candidates_other: return self.choose_candidate(candidates_other, source_use_counts)
+            return self.choose_candidate(candidates_current, source_use_counts, motion_db, target_motion, frame_count, motion_scale)
+        if candidates_other:
+            return self.choose_candidate(candidates_other, source_use_counts, motion_db, target_motion, frame_count, motion_scale)
         offset = 1
         while offset < 256:
             low, high = target_b - offset, target_b + offset
@@ -740,8 +818,9 @@ class GlitchProcessor:
             if self.use_primary_video():
                 primary_fallback = [item for item in fallback if item[0] == self.primary_video_idx]
                 if primary_fallback and random.random() < self.primary_focus:
-                    return self.choose_candidate(primary_fallback, source_use_counts)
-            if fallback: return self.choose_candidate(fallback, source_use_counts)
+                    return self.choose_candidate(primary_fallback, source_use_counts, motion_db, target_motion, frame_count, motion_scale)
+            if fallback:
+                return self.choose_candidate(fallback, source_use_counts, motion_db, target_motion, frame_count, motion_scale)
             offset += 1
         return None
 
@@ -803,6 +882,12 @@ class GlitchProcessor:
         def get_val(arr, t): return arr[min(np.searchsorted(times, t), len(arr)-1)]
         def norm_val(arr, max_val, t):
             return np.clip(float(get_val(arr, t)) / max(max_val, 1e-9), 0, 1)
+        def norm_range(arr, max_val, start_t, end_t):
+            start_idx = min(np.searchsorted(times, start_t), len(arr) - 1)
+            end_idx = min(np.searchsorted(times, end_t), len(arr) - 1)
+            if end_idx <= start_idx:
+                return norm_val(arr, max_val, start_t)
+            return np.clip(float(np.mean(arr[start_idx:end_idx])) / max(max_val, 1e-9), 0, 1)
         
         # Aggressive normalization for punchier effects
         max_rms = float(np.percentile(rms_energy, 99.5))
@@ -824,6 +909,7 @@ class GlitchProcessor:
         caps, prev_f = [cv2.VideoCapture(f) for f in self.inputs], None
         source_use_counts = [0 for _ in self.inputs]
         reference_stats = color_stats.get(self.color_reference_idx) if self.color_reference_idx is not None else None
+        motion_scale = self.motion_scale(motion_db)
         segments = []
         rendered_frames = 0
         if self.export_mode == EXPORT_CLIP_MLT:
@@ -836,6 +922,8 @@ class GlitchProcessor:
             self.log(f"  Primary focus: {os.path.basename(self.inputs[self.primary_video_idx])} ({self.primary_focus:.2f})")
         if self.source_variety > 0:
             self.log(f"  Source variety: {self.source_variety:.2f}")
+        if self.music_match > 0:
+            self.log(f"  Music match: {self.music_match:.2f}")
         if reference_stats and self.color_match_strength > 0:
             self.log(f"  Color reference: {os.path.basename(self.inputs[self.color_reference_idx])} ({self.color_match_strength:.2f})")
         for i in range(len(cut_times)):
@@ -845,11 +933,25 @@ class GlitchProcessor:
             num_frames = max(1, int(dur * self.fps))
             
             curr_rms = norm_val(rms_energy, max_rms, t_start)
-            curr_bass = norm_val(bass_energy, max_bass, t_start)
-            curr_highs = norm_val(highs_energy, max_highs, t_start)
-            curr_mids = norm_val(mids_energy, max_mids, t_start)
+            clip_end = t_start + dur
+            clip_rms = norm_range(rms_energy, max_rms, t_start, clip_end)
+            clip_bass = norm_range(bass_energy, max_bass, t_start, clip_end)
+            clip_highs = norm_range(highs_energy, max_highs, t_start, clip_end)
+            clip_mids = norm_range(mids_energy, max_mids, t_start, clip_end)
+            music_energy = np.clip((clip_rms * 0.55) + (clip_bass * 0.30) + (clip_highs * 0.15), 0, 1)
+            target_brightness = int(np.clip(((1 - self.music_match) * curr_rms) + (self.music_match * music_energy), 0, 1) * 255)
+            target_motion = np.clip((clip_rms * 0.45) + (clip_bass * 0.40) + (clip_highs * 0.15), 0, 1)
             
-            match = self.find_best_match(int(curr_rms * 255), frame_db, self.current_vid_idx, source_use_counts)
+            match = self.find_best_match(
+                target_brightness,
+                frame_db,
+                self.current_vid_idx,
+                source_use_counts,
+                motion_db,
+                target_motion,
+                num_frames,
+                motion_scale,
+            )
             if match:
                 self.current_vid_idx, start_frame = match
                 source_use_counts[self.current_vid_idx] += 1
@@ -859,7 +961,7 @@ class GlitchProcessor:
                     r, f = caps[self.current_vid_idx].read()
                     if r: chunk.append(f)
                 rewind_amount = self.effect_amount("rewind")
-                if self.rewind and curr_rms > 0.75 and random.random() < min(1.0, rewind_amount):
+                if self.rewind and clip_rms > 0.75 and random.random() < min(1.0, rewind_amount):
                     chunk = chunk[::-1]
 
                 pixelate_amount = self.effect_amount("pixelate")
@@ -867,12 +969,18 @@ class GlitchProcessor:
                 rgb_shift_amount = self.effect_amount("rgb_shift")
                 shake_amount = self.effect_amount("shake")
                 ghosting_amount = self.effect_amount("ghosting")
+                monochrome_amount = self.effect_amount("monochrome")
+                hue_shift_amount = self.effect_amount("hue_shift")
+                vignette_amount = self.effect_amount("vignette")
                 static_pan_zoom_amount = self.effect_amount("static_pan_zoom")
                 pixelate_frame_timing = self.effect_uses_frame_timing("pixelate")
                 flash_frame_timing = self.effect_uses_frame_timing("flash")
                 rgb_shift_frame_timing = self.effect_uses_frame_timing("rgb_shift")
                 shake_frame_timing = self.effect_uses_frame_timing("shake")
                 ghosting_frame_timing = self.effect_uses_frame_timing("ghosting")
+                monochrome_frame_timing = self.effect_uses_frame_timing("monochrome")
+                hue_shift_frame_timing = self.effect_uses_frame_timing("hue_shift")
+                vignette_frame_timing = self.effect_uses_frame_timing("vignette")
                 motion_score = self.segment_motion_score(motion_db, self.current_vid_idx, start_frame, len(chunk))
                 use_static_pan_zoom = (
                     self.static_pan_zoom
@@ -893,13 +1001,16 @@ class GlitchProcessor:
                     frame_bass = norm_val(bass_energy, max_bass, frame_time)
                     frame_highs = norm_val(highs_energy, max_highs, frame_time)
                     frame_mids = norm_val(mids_energy, max_mids, frame_time)
-                    pixelate_rms = frame_rms if pixelate_frame_timing else curr_rms
-                    pixelate_highs = frame_highs if pixelate_frame_timing else curr_highs
-                    flash_rms = frame_rms if flash_frame_timing else curr_rms
-                    flash_highs = frame_highs if flash_frame_timing else curr_highs
-                    rgb_shift_highs = frame_highs if rgb_shift_frame_timing else curr_highs
-                    shake_bass = frame_bass if shake_frame_timing else curr_bass
-                    ghosting_mids = frame_mids if ghosting_frame_timing else curr_mids
+                    pixelate_rms = frame_rms if pixelate_frame_timing else clip_rms
+                    pixelate_highs = frame_highs if pixelate_frame_timing else clip_highs
+                    flash_rms = frame_rms if flash_frame_timing else clip_rms
+                    flash_highs = frame_highs if flash_frame_timing else clip_highs
+                    rgb_shift_highs = frame_highs if rgb_shift_frame_timing else clip_highs
+                    shake_bass = frame_bass if shake_frame_timing else clip_bass
+                    ghosting_mids = frame_mids if ghosting_frame_timing else clip_mids
+                    monochrome_mids = frame_mids if monochrome_frame_timing else clip_mids
+                    hue_shift_highs = frame_highs if hue_shift_frame_timing else clip_highs
+                    vignette_bass = frame_bass if vignette_frame_timing else clip_bass
                     if f.shape[:2] != (height, width): f = cv2.resize(f, (width, height))
                     if use_static_pan_zoom:
                         progress = frame_idx / max(1, len(chunk) - 1)
@@ -928,6 +1039,12 @@ class GlitchProcessor:
                         f = apply_shake(f, shake_bass, self.sensitivity * shake_amount)
                     if self.ghosting and ghosting_amount > 0:
                         f = apply_ghosting(f, prev_f, ghosting_mids, self.sensitivity * ghosting_amount)
+                    if self.monochrome and monochrome_amount > 0:
+                        f = apply_monochrome(f, monochrome_mids, self.sensitivity, monochrome_amount)
+                    if self.hue_shift and hue_shift_amount > 0:
+                        f = apply_hue_shift(f, hue_shift_highs, self.sensitivity, hue_shift_amount)
+                    if self.vignette and vignette_amount > 0:
+                        f = apply_vignette(f, vignette_bass, self.sensitivity, vignette_amount)
                     if self.lut is not None:
                         f = apply_cube_lut(f, self.lut)
                     out.write(f)
@@ -1038,8 +1155,8 @@ class GlitchGUI:
         self.root = root
         self.current_project_path = None
         self.root.title("GlitchSync Pro v3.8")
-        self.root.geometry("1180x1280")
-        self.root.minsize(1100, 1220)
+        self.root.geometry("1180x1360")
+        self.root.minsize(1100, 1280)
         self.inputs, self.audio = [], tk.StringVar()
         self.output = tk.StringVar(value=f"glitch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
         self.output_auto_managed = True
@@ -1051,6 +1168,8 @@ class GlitchGUI:
         self.duration, self.fps, self.coherence, self.sensitivity = tk.DoubleVar(value=0.10), tk.IntVar(value=30), tk.DoubleVar(value=0.20), tk.DoubleVar(value=1.0)
         self.source_variety = tk.DoubleVar(value=0.0)
         self.source_variety_label = None
+        self.music_match = tk.DoubleVar(value=0.0)
+        self.music_match_label = None
         self.color_match_enabled = tk.BooleanVar(value=False)
         self.color_match_strength = tk.DoubleVar(value=0.5)
         self.color_match_strength_label = None
@@ -1072,6 +1191,9 @@ class GlitchGUI:
         self.primary_video_label = tk.StringVar(value="Primary: first input")
         self.beat_sync = tk.BooleanVar(value=True)
         self.pixelate, self.flash, self.rewind, self.rgb_shift, self.shake, self.ghosting = [tk.BooleanVar(value=True) for _ in range(6)]
+        self.monochrome = tk.BooleanVar(value=False)
+        self.hue_shift = tk.BooleanVar(value=False)
+        self.vignette = tk.BooleanVar(value=False)
         self.static_pan_zoom = tk.BooleanVar(value=False)
         self.style_name = tk.StringVar(value=DEFAULT_STYLE_NAME)
         self.style_choice = tk.StringVar()
@@ -1211,19 +1333,22 @@ class GlitchGUI:
         ttk.Label(set_f, text="Source variety:").grid(row=5, column=0)
         ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.source_variety, command=lambda e: self.update_source_variety_label()).grid(row=5, column=1, sticky="ew")
         self.source_variety_label = ttk.Label(set_f, text="0.00"); self.source_variety_label.grid(row=5, column=2)
-        ttk.Label(set_f, text="Sensitivity:").grid(row=6, column=0)
-        ttk.Scale(set_f, from_=0.1, to=3.0, variable=self.sensitivity, command=lambda e: self.l_sen.config(text=f"{self.sensitivity.get():.2f}")).grid(row=6, column=1, sticky="ew")
-        self.l_sen = ttk.Label(set_f, text="1.00"); self.l_sen.grid(row=6, column=2)
-        ttk.Label(set_f, text="FPS:").grid(row=7, column=0)
-        ttk.Spinbox(set_f, from_=1, to=120, textvariable=self.fps, width=5).grid(row=7, column=1, sticky="w")
-        ttk.Label(set_f, text="Style name:").grid(row=8, column=0)
-        ttk.Entry(set_f, textvariable=self.style_name).grid(row=8, column=1, sticky="ew")
-        ttk.Button(set_f, text="Save Style", command=self.save_named_style).grid(row=8, column=2, sticky="ew")
-        ttk.Label(set_f, text="Load style:").grid(row=9, column=0)
+        ttk.Label(set_f, text="Music match:").grid(row=6, column=0)
+        ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.music_match, command=lambda e: self.update_music_match_label()).grid(row=6, column=1, sticky="ew")
+        self.music_match_label = ttk.Label(set_f, text="0.00"); self.music_match_label.grid(row=6, column=2)
+        ttk.Label(set_f, text="Sensitivity:").grid(row=7, column=0)
+        ttk.Scale(set_f, from_=0.1, to=3.0, variable=self.sensitivity, command=lambda e: self.l_sen.config(text=f"{self.sensitivity.get():.2f}")).grid(row=7, column=1, sticky="ew")
+        self.l_sen = ttk.Label(set_f, text="1.00"); self.l_sen.grid(row=7, column=2)
+        ttk.Label(set_f, text="FPS:").grid(row=8, column=0)
+        ttk.Spinbox(set_f, from_=1, to=120, textvariable=self.fps, width=5).grid(row=8, column=1, sticky="w")
+        ttk.Label(set_f, text="Style name:").grid(row=9, column=0)
+        ttk.Entry(set_f, textvariable=self.style_name).grid(row=9, column=1, sticky="ew")
+        ttk.Button(set_f, text="Save Style", command=self.save_named_style).grid(row=9, column=2, sticky="ew")
+        ttk.Label(set_f, text="Load style:").grid(row=10, column=0)
         self.style_combo = ttk.Combobox(set_f, textvariable=self.style_choice, state="readonly")
-        self.style_combo.grid(row=9, column=1, sticky="ew")
-        ttk.Button(set_f, text="Load Style", command=self.load_named_style).grid(row=9, column=2, sticky="ew")
-        ttk.Button(set_f, text="Delete Style", command=self.delete_named_style).grid(row=10, column=2, sticky="ew")
+        self.style_combo.grid(row=10, column=1, sticky="ew")
+        ttk.Button(set_f, text="Load Style", command=self.load_named_style).grid(row=10, column=2, sticky="ew")
+        ttk.Button(set_f, text="Delete Style", command=self.delete_named_style).grid(row=11, column=2, sticky="ew")
 
         fx = ttk.LabelFrame(m, text="Effects", padding="10"); fx.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
         fx.columnconfigure(1, weight=1)
@@ -1235,7 +1360,10 @@ class GlitchGUI:
         self.add_effect_control(fx, 4, "RGB Shift", self.rgb_shift, "rgb_shift")
         self.add_effect_control(fx, 5, "Shake", self.shake, "shake")
         self.add_effect_control(fx, 6, "Ghosting", self.ghosting, "ghosting")
-        self.add_effect_control(fx, 7, "Static Pan/Zoom", self.static_pan_zoom, "static_pan_zoom", 1.0)
+        self.add_effect_control(fx, 7, "Monochrome", self.monochrome, "monochrome")
+        self.add_effect_control(fx, 8, "Hue Shift", self.hue_shift, "hue_shift")
+        self.add_effect_control(fx, 9, "Vignette", self.vignette, "vignette")
+        self.add_effect_control(fx, 10, "Static Pan/Zoom", self.static_pan_zoom, "static_pan_zoom", 1.0)
 
         log_f = ttk.LabelFrame(m, text="Engine Log", padding="5"); log_f.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=5)
         self.log_t = tk.Text(log_f, height=8, font=('Consolas', 9)); self.log_t.pack(fill=tk.BOTH, expand=True)
@@ -1267,6 +1395,9 @@ class GlitchGUI:
     def update_source_variety_label(self):
         if self.source_variety_label:
             self.source_variety_label.config(text=f"{self.source_variety.get():.2f}")
+    def update_music_match_label(self):
+        if self.music_match_label:
+            self.music_match_label.config(text=f"{self.music_match.get():.2f}")
     def update_color_match_strength_label(self):
         if self.color_match_strength_label:
             self.color_match_strength_label.config(text=f"{self.color_match_strength.get():.2f}")
@@ -1318,6 +1449,7 @@ class GlitchGUI:
             "coherence": self.coherence.get(),
             "sensitivity": self.sensitivity.get(),
             "source_variety": self.source_variety.get(),
+            "music_match": self.music_match.get(),
             "color_match_enabled": self.color_match_enabled.get(),
             "color_match_strength": self.color_match_strength.get(),
             "lut_path": self.lut_path.get(),
@@ -1331,6 +1463,9 @@ class GlitchGUI:
                 "rgb_shift": self.rgb_shift.get(),
                 "shake": self.shake.get(),
                 "ghosting": self.ghosting.get(),
+                "monochrome": self.monochrome.get(),
+                "hue_shift": self.hue_shift.get(),
+                "vignette": self.vignette.get(),
                 "static_pan_zoom": self.static_pan_zoom.get(),
             },
             "effect_amounts": {name: var.get() for name, var in self.effect_amounts.items()},
@@ -1481,6 +1616,7 @@ class GlitchGUI:
         self.coherence.set(settings.get("coherence", self.coherence.get()))
         self.sensitivity.set(settings.get("sensitivity", self.sensitivity.get()))
         self.source_variety.set(settings.get("source_variety", self.source_variety.get()))
+        self.music_match.set(settings.get("music_match", self.music_match.get()))
         self.color_match_enabled.set(settings.get("color_match_enabled", self.color_match_enabled.get()))
         self.color_match_strength.set(settings.get("color_match_strength", self.color_match_strength.get()))
         self.color_reference_idx = int(settings.get("color_reference_idx", self.color_reference_idx) or 0)
@@ -1496,6 +1632,9 @@ class GlitchGUI:
         self.rgb_shift.set(effects_enabled.get("rgb_shift", self.rgb_shift.get()))
         self.shake.set(effects_enabled.get("shake", self.shake.get()))
         self.ghosting.set(effects_enabled.get("ghosting", self.ghosting.get()))
+        self.monochrome.set(effects_enabled.get("monochrome", False))
+        self.hue_shift.set(effects_enabled.get("hue_shift", False))
+        self.vignette.set(effects_enabled.get("vignette", False))
         self.static_pan_zoom.set(effects_enabled.get("static_pan_zoom", False))
         for name, value in settings.get("effect_amounts", {}).items():
             if name in self.effect_amounts:
@@ -1512,6 +1651,7 @@ class GlitchGUI:
         self.l_sen.config(text=f"{self.sensitivity.get():.2f}")
         self.update_beat_variation_label()
         self.update_source_variety_label()
+        self.update_music_match_label()
         self.update_color_match_strength_label()
         self.update_primary_focus_label()
     def save_named_style(self):
@@ -1670,7 +1810,7 @@ class GlitchGUI:
             color_match_strength = self.color_match_strength.get() if self.color_match_enabled.get() else 0.0
             render_limit = self.snippet_duration.get() if self.render_mode.get() == "Snippet" else None
             output_resolution = OUTPUT_RESOLUTION_LABELS.get(self.output_resolution_label.get())
-            p = GlitchProcessor(self.inputs, self.audio.get(), self.output.get(), self.duration.get(), self.fps.get(), self.pixelate.get(), self.flash.get(), self.rewind.get(), self.rgb_shift.get(), self.shake.get(), self.ghosting.get(), self.static_pan_zoom.get(), self.beat_sync.get(), self.coherence.get(), self.sensitivity.get(), export_mode, self.update_p, self.log_msg, self.display_frame, effect_amounts, primary_idx, primary_focus, self.beat_step.get(), self.beat_variation.get(), render_limit, self.source_variety.get(), color_reference_idx, color_match_strength, self.lut_path.get().strip(), output_resolution, self.export_quality_label.get(), effect_timing)
+            p = GlitchProcessor(self.inputs, self.audio.get(), self.output.get(), self.duration.get(), self.fps.get(), self.pixelate.get(), self.flash.get(), self.rewind.get(), self.rgb_shift.get(), self.shake.get(), self.ghosting.get(), self.static_pan_zoom.get(), self.monochrome.get(), self.hue_shift.get(), self.vignette.get(), self.beat_sync.get(), self.coherence.get(), self.sensitivity.get(), export_mode, self.update_p, self.log_msg, self.display_frame, effect_amounts, primary_idx, primary_focus, self.beat_step.get(), self.beat_variation.get(), render_limit, self.source_variety.get(), self.music_match.get(), color_reference_idx, color_match_strength, self.lut_path.get().strip(), output_resolution, self.export_quality_label.get(), effect_timing)
             self.active_processor = p
             if self.render_was_stopped:
                 p.stop_requested = True
@@ -1715,9 +1855,10 @@ if __name__ == "__main__":
     p.add_argument("--beat-step", type=int, default=1)
     p.add_argument("--beat-variation", type=float, default=0.0)
     p.add_argument("--render-limit", type=float)
+    p.add_argument("--music-match", type=float, default=0.0)
     args = p.parse_args()
     if args.gui or not (args.inputs and args.audio):
         r = tk.Tk(); g = GlitchGUI(r); r.mainloop()
     else:
-        proc = GlitchProcessor(args.inputs, args.audio, args.output, beat_sync=args.beat_sync, export_mode=args.export_mode, progress_callback=lambda c, t: print(f"Progress: {c}/{t}", end='\r'), beat_step=args.beat_step, beat_variation=args.beat_variation, render_limit=args.render_limit, export_quality_label=args.export_quality)
+        proc = GlitchProcessor(args.inputs, args.audio, args.output, beat_sync=args.beat_sync, export_mode=args.export_mode, progress_callback=lambda c, t: print(f"Progress: {c}/{t}", end='\r'), beat_step=args.beat_step, beat_variation=args.beat_variation, render_limit=args.render_limit, music_match=args.music_match, export_quality_label=args.export_quality)
         proc.process()

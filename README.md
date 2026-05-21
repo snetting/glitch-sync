@@ -9,15 +9,19 @@ Audio-reactive video glitch tool that synchronizes video cuts and visual effects
   - **RGB Shift**: Chromatic aberration synced to audio peaks.
   - **Shake**: Bass-driven camera movement.
   - **Ghosting**: Temporal motion blur synced to mids.
+  - **Monochrome**: Beat-reactive desaturation for black-and-white accent moments.
+  - **Hue Shift**: High-frequency-triggered color rotation.
+  - **Vignette**: Bass-reactive edge darkening for pulse emphasis.
   - **Static Pan/Zoom**: Optional slow zoom and subtle randomized pan on low-motion source segments.
   - **Flash**: Brightness bursts on transients.
   - **Rewind**: Stutter/rewind effects on intense peaks.
-- **Per-Effect Amount and Timing Controls**: Fine tune each enabled effect independently and choose whether audio-reactive calculations use frame-wide or clip-wide timing.
+- **Per-Effect Amount and Timing Controls**: Fine tune each enabled effect independently and choose whether audio-reactive calculations use frame-wide timing or one averaged clip-wide value.
 - **Beat Interval and Variation**: Cut every N beats during Beat Sync, with optional extra cuts on skipped beats for variety.
 - **Duration Control**: When Beat Sync is off, set fixed edit lengths from 0 to 8 seconds.
 - **Output Resolution Presets**: Use the first input's resolution automatically, or override to 480p, 720p, 1080p, 4K, or 8K.
-- **Export Quality Presets**: Choose high quality, balanced, or fast preview encoding for final MP4 and cut-aware Shotcut exports.
+- **Export Quality Presets**: Choose master quality, high quality, balanced, or fast preview encoding for final MP4 and cut-aware Shotcut exports.
 - **Source Variety**: Bias clip selection toward under-used input videos during a render.
+- **Music Match**: Bias clip selection so louder, bass-heavy, or high-energy sections prefer brighter and higher-motion source regions.
 - **Color Matching and LUTs**: Match clips toward a selected reference video's cached color profile with adjustable strength, or apply a user-supplied `.cube` LUT at full strength.
 - **Saved Styles**: Load starter styles and save/delete named settings presets. New sessions and new projects start from the built-in Default style.
 - **Snippet Rendering**: Render a short preview section, such as 30 seconds, before committing to a full export.
@@ -37,8 +41,9 @@ Audio-reactive video glitch tool that synchronizes video cuts and visual effects
 ## CLI Export Modes
 
 Use `--export-mode final_video`, `--export-mode cut_aware_mlt`, or `--export-mode clip_mlt`.
-Use `--export-quality "High quality (slower)"`, `--export-quality Balanced`, or `--export-quality "Fast preview"` to choose the final encoding preset.
+Use `--export-quality "Master quality (largest)"`, `--export-quality "High quality (slower)"`, `--export-quality Balanced`, or `--export-quality "Fast preview"` to choose the final encoding preset.
 Use `--beat-step 8 --beat-variation 0.2` with `--beat_sync` to make main cuts every 8 beats while allowing occasional extra cuts.
+Use `--music-match 0.6` to bias source selection toward brighter and higher-motion clips during louder or more energetic audio sections.
 
 The Shotcut modes create a ZIP archive containing `glitchsync_project.mlt` and relative `media/` files.
 
