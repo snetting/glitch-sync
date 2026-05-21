@@ -26,6 +26,7 @@ Audio-reactive video glitch tool that synchronizes video cuts and visual effects
 - **Music Match**: Bias clip selection so louder, bass-heavy, or high-energy sections prefer brighter and higher-motion source regions.
 - **Color Matching and LUTs**: Match clips toward a selected reference video's cached color profile with adjustable strength, or apply a user-supplied `.cube` LUT at full strength.
 - **Saved Styles**: Load starter styles and save/delete named settings presets. New sessions and new projects start from the built-in Default style.
+- **Auto Style**: Analyze the selected audio track and choose a built-in style from tempo, energy, bass, highs, and dynamics.
 - **Snippet Rendering**: Render a short preview section, such as 30 seconds, before committing to a full export.
 - **Render Abort**: Stop an in-progress render from the main controls.
 - **Project Files**: New, save, save as, and load full project state, including media paths, output path, primary focus selection, style, and unsaved setting tweaks.

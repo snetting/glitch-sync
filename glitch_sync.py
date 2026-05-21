@@ -301,6 +301,16 @@ BUILTIN_STYLES = {
 }
 
 
+AUTO_STYLE_PROFILES = {
+    "Ambient Drift": {"tempo": 75, "energy": 0.30, "bass": 0.30, "highs": 0.18, "dynamic": 0.35},
+    "Mellow Story": {"tempo": 90, "energy": 0.36, "bass": 0.35, "highs": 0.24, "dynamic": 0.42},
+    "Pop Performance": {"tempo": 112, "energy": 0.48, "bass": 0.42, "highs": 0.34, "dynamic": 0.50},
+    "Rock Punch": {"tempo": 126, "energy": 0.58, "bass": 0.52, "highs": 0.32, "dynamic": 0.58},
+    "EDM Pulse": {"tempo": 132, "energy": 0.66, "bass": 0.56, "highs": 0.48, "dynamic": 0.62},
+    "Glitch Heavy": {"tempo": 145, "energy": 0.76, "bass": 0.50, "highs": 0.58, "dynamic": 0.72},
+}
+
+
 def frame_count_to_out(frame_count):
     return max(0, frame_count - 1)
 
@@ -626,6 +636,52 @@ class GlitchProcessor:
             self.export_quality_label,
             EXPORT_QUALITY_LABELS["High quality (slower)"],
         )
+
+    @staticmethod
+    def describe_audio_style(audio_features):
+        bass = audio_features["bass_energy"]
+        highs = audio_features["highs_energy"]
+        mids = audio_features["mids_energy"]
+        rms = audio_features["rms_energy"]
+        tempo = float(audio_features["tempo"])
+        duration = max(float(audio_features["duration"]), 1e-6)
+        p95 = max(float(np.percentile(rms, 95)), 1e-9)
+        p50 = float(np.percentile(rms, 50))
+        bass_mean = float(np.mean(bass))
+        highs_mean = float(np.mean(highs))
+        mids_mean = float(np.mean(mids))
+        spectral_total = max(bass_mean + highs_mean + mids_mean, 1e-9)
+        return {
+            "tempo": tempo,
+            "energy": float(np.clip(np.mean(rms) / p95, 0, 1)),
+            "bass": float(np.clip(bass_mean / spectral_total, 0, 1)),
+            "highs": float(np.clip(highs_mean / spectral_total, 0, 1)),
+            "dynamic": float(np.clip((p95 - p50) / p95, 0, 1)),
+            "beat_density": float(len(audio_features["beats"]) / duration),
+        }
+
+    @staticmethod
+    def choose_auto_style(audio_features):
+        desc = GlitchProcessor.describe_audio_style(audio_features)
+        if desc["tempo"] < 85 and desc["energy"] < 0.42:
+            return "Ambient Drift", desc
+        if desc["tempo"] < 105 and desc["energy"] < 0.50:
+            return "Mellow Story", desc
+        if desc["tempo"] > 138 and desc["highs"] > 0.42 and desc["dynamic"] > 0.58:
+            return "Glitch Heavy", desc
+        best_name = "Pop Performance"
+        best_score = float("inf")
+        for name, profile in AUTO_STYLE_PROFILES.items():
+            score = (
+                abs(desc["tempo"] - profile["tempo"]) / 80
+                + abs(desc["energy"] - profile["energy"]) * 1.2
+                + abs(desc["bass"] - profile["bass"]) * 0.8
+                + abs(desc["highs"] - profile["highs"]) * 0.8
+                + abs(desc["dynamic"] - profile["dynamic"]) * 0.9
+            )
+            if score < best_score:
+                best_name, best_score = name, score
+        return best_name, desc
 
     def choose_candidate(self, candidates, source_use_counts=None, motion_db=None,
                          target_motion=None, frame_count=1, motion_scale=1.0):
@@ -1390,6 +1446,7 @@ class GlitchGUI:
         self.style_combo = ttk.Combobox(set_f, textvariable=self.style_choice, state="readonly")
         self.style_combo.grid(row=10, column=1, sticky="ew")
         ttk.Button(set_f, text="Load Style", command=self.load_named_style).grid(row=10, column=2, sticky="ew")
+        ttk.Button(set_f, text="Auto Style", command=self.auto_style).grid(row=11, column=1, sticky="ew")
         ttk.Button(set_f, text="Delete Style", command=self.delete_named_style).grid(row=11, column=2, sticky="ew")
 
         fx = ttk.LabelFrame(m, text="Effects", padding="10"); fx.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
@@ -1718,6 +1775,35 @@ class GlitchGUI:
             return messagebox.showerror("Error", "Select a saved style to load")
         self.apply_settings(self.styles[name])
         self.style_name.set(name)
+    def auto_style(self):
+        audio_path = self.audio.get()
+        if not audio_path:
+            return messagebox.showerror("Auto Style", "Select an audio file first.")
+        if not os.path.exists(audio_path):
+            return messagebox.showerror("Auto Style", "The selected audio file does not exist.")
+        self.log_msg("Auto Style: analyzing audio...")
+        threading.Thread(target=self._auto_style_worker, args=(audio_path,), daemon=True).start()
+    def _auto_style_worker(self, audio_path):
+        try:
+            processor = GlitchProcessor([], audio_path, "", log_callback=self.log_msg)
+            audio_features = processor.analyze_audio_file()
+            style_name, desc = GlitchProcessor.choose_auto_style(audio_features)
+            self.root.after(0, self._apply_auto_style_ui, style_name, desc)
+        except Exception as e:
+            self.log_msg(f"Auto Style error: {e}")
+            self.root.after(0, messagebox.showerror, "Auto Style", f"Could not analyze audio:\n{e}")
+    def _apply_auto_style_ui(self, style_name, desc):
+        if style_name not in self.styles:
+            style_name = DEFAULT_STYLE_NAME
+        self.apply_settings(self.styles[style_name])
+        self.style_name.set(style_name)
+        self.style_choice.set(style_name)
+        self.log_msg(
+            "Auto Style selected "
+            f"{style_name} (tempo {desc['tempo']:.1f} BPM, energy {desc['energy']:.2f}, "
+            f"bass {desc['bass']:.2f}, highs {desc['highs']:.2f})"
+        )
+        messagebox.showinfo("Auto Style", f"Selected style: {style_name}")
     def delete_named_style(self):
         name = self.style_choice.get() or self.style_name.get().strip()
         if not name or name not in self.styles:
