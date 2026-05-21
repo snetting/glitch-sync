@@ -20,7 +20,7 @@ Audio-reactive video glitch tool that synchronizes video cuts and visual effects
 - **One-Bar Default Pacing**: New projects default to a 4-beat interval, which corresponds to one bar in typical 4/4 music.
 - **Duration Control**: When Beat Sync is off, set fixed edit lengths from 0 to 8 seconds.
 - **Output Resolution Presets**: Use the first input's resolution automatically, or override to 480p, 720p, 1080p, 4K, or 8K.
-- **Aspect-Safe Source Fitting**: Mismatched source videos are scaled to fit and centered over a soft cover-fill background instead of being stretched or exposing black transform borders.
+- **Aspect-Safe Source Fitting**: Mismatched source videos are scaled to cover and center-cropped instead of being stretched or exposing transform borders.
 - **Export Quality Presets**: Choose master quality, high quality, balanced, or fast preview encoding for final MP4 and cut-aware Shotcut exports.
 - **Source Variety**: Bias clip selection toward under-used input videos during a render.
 - **Music Match**: Bias clip selection so louder, bass-heavy, or high-energy sections prefer brighter and higher-motion source regions.

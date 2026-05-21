@@ -143,24 +143,15 @@ def fit_frame_to_output(frame, width, height):
     src_h, src_w = frame.shape[:2]
     if src_w == width and src_h == height:
         return frame
-    contain_scale = min(width / max(src_w, 1), height / max(src_h, 1))
     cover_scale = max(width / max(src_w, 1), height / max(src_h, 1))
-    bg_w = max(1, int(round(src_w * cover_scale)))
-    bg_h = max(1, int(round(src_h * cover_scale)))
-    background = cv2.resize(frame, (bg_w, bg_h), interpolation=cv2.INTER_AREA if cover_scale < 1 else cv2.INTER_LINEAR)
-    bg_x = max(0, (bg_w - width) // 2)
-    bg_y = max(0, (bg_h - height) // 2)
-    fitted = background[bg_y:bg_y + height, bg_x:bg_x + width]
+    new_w = max(1, int(round(src_w * cover_scale)))
+    new_h = max(1, int(round(src_h * cover_scale)))
+    resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA if cover_scale < 1 else cv2.INTER_LINEAR)
+    x = max(0, (new_w - width) // 2)
+    y = max(0, (new_h - height) // 2)
+    fitted = resized[y:y + height, x:x + width]
     if fitted.shape[:2] != (height, width):
         fitted = cv2.resize(fitted, (width, height), interpolation=cv2.INTER_LINEAR)
-    blur_kernel = max(15, int(min(width, height) * 0.035) | 1)
-    fitted = cv2.GaussianBlur(fitted, (blur_kernel, blur_kernel), 0)
-    new_w = max(1, int(round(src_w * contain_scale)))
-    new_h = max(1, int(round(src_h * contain_scale)))
-    resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA if contain_scale < 1 else cv2.INTER_LINEAR)
-    x = (width - new_w) // 2
-    y = (height - new_h) // 2
-    fitted[y:y + new_h, x:x + new_w] = resized
     return fitted
 
 
