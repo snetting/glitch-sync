@@ -15,7 +15,7 @@ Audio-reactive video glitch tool that synchronizes video cuts and visual effects
   - **Static Pan/Zoom**: Optional slow zoom and subtle randomized pan on low-motion source segments.
   - **Flash**: Brightness bursts on transients.
   - **Rewind**: Stutter/rewind effects on intense peaks.
-- **Per-Effect Amount and Timing Controls**: Fine tune each enabled effect independently and choose whether audio-reactive calculations use frame-wide timing or one averaged clip-wide value.
+- **Per-Effect Amount and Timing Controls**: Fine tune each enabled effect independently and choose frame-wide timing, one averaged clip-wide value, or a per-clip random choice between the two.
 - **Beat Interval and Variation**: Cut every N beats during Beat Sync, with optional extra cuts on skipped beats for variety.
 - **One-Bar Default Pacing**: New projects default to a 4-beat interval, which corresponds to one bar in typical 4/4 music.
 - **Duration Control**: When Beat Sync is off, set fixed edit lengths from 0 to 8 seconds.

@@ -63,17 +63,17 @@ DEFAULT_EFFECT_AMOUNTS = {
     "vignette": 0.45,
     "static_pan_zoom": 0.4,
 }
-EFFECT_TIMING_LABELS = ("Frame", "Clip")
+EFFECT_TIMING_LABELS = ("Frame", "Clip", "Random")
 DEFAULT_EFFECT_TIMING = {
-    "pixelate": "Frame",
+    "pixelate": "Random",
     "flash": "Frame",
     "rewind": "Clip",
-    "rgb_shift": "Frame",
+    "rgb_shift": "Random",
     "shake": "Frame",
-    "ghosting": "Frame",
-    "monochrome": "Frame",
-    "hue_shift": "Frame",
-    "vignette": "Frame",
+    "ghosting": "Random",
+    "monochrome": "Clip",
+    "hue_shift": "Random",
+    "vignette": "Clip",
     "static_pan_zoom": "Clip",
 }
 DEFAULT_STYLE_NAME = "Default"
@@ -233,6 +233,7 @@ BUILTIN_STYLES = {
         beat_variation=0.12,
         effects_enabled={"monochrome": True, "vignette": True, "static_pan_zoom": True},
         effect_amounts={"pixelate": 0.25, "flash": 0.18, "rewind": 0.1, "rgb_shift": 0.2, "shake": 0.15, "ghosting": 0.7, "monochrome": 0.28, "hue_shift": 0.0, "vignette": 0.35, "static_pan_zoom": 0.45},
+        effect_timing={"pixelate": "Clip", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Clip", "shake": "Clip", "ghosting": "Clip", "monochrome": "Clip", "hue_shift": "Clip", "vignette": "Clip", "static_pan_zoom": "Clip"},
         primary_focus=0.9,
     ),
     "Pop Performance": make_style(
@@ -245,6 +246,7 @@ BUILTIN_STYLES = {
         beat_variation=0.25,
         effects_enabled={"hue_shift": True, "vignette": True},
         effect_amounts={"pixelate": 0.5, "flash": 0.55, "rewind": 0.2, "rgb_shift": 0.65, "shake": 0.45, "ghosting": 0.5, "monochrome": 0.0, "hue_shift": 0.22, "vignette": 0.25, "static_pan_zoom": 0.35},
+        effect_timing={"pixelate": "Random", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Random", "shake": "Frame", "ghosting": "Random", "monochrome": "Clip", "hue_shift": "Random", "vignette": "Random", "static_pan_zoom": "Clip"},
     ),
     "EDM Pulse": make_style(
         coherence=0.35,
@@ -256,6 +258,7 @@ BUILTIN_STYLES = {
         beat_variation=0.45,
         effects_enabled={"hue_shift": True, "vignette": True},
         effect_amounts={"pixelate": 1.2, "flash": 1.25, "rewind": 0.45, "rgb_shift": 1.25, "shake": 1.1, "ghosting": 0.65, "monochrome": 0.0, "hue_shift": 0.75, "vignette": 0.45, "static_pan_zoom": 0.25},
+        effect_timing={"pixelate": "Random", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Frame", "shake": "Frame", "ghosting": "Random", "monochrome": "Clip", "hue_shift": "Frame", "vignette": "Random", "static_pan_zoom": "Clip"},
     ),
     "Rock Punch": make_style(
         coherence=0.5,
@@ -267,6 +270,7 @@ BUILTIN_STYLES = {
         beat_variation=0.25,
         effects_enabled={"monochrome": True, "vignette": True},
         effect_amounts={"pixelate": 0.65, "flash": 0.6, "rewind": 0.25, "rgb_shift": 0.65, "shake": 1.25, "ghosting": 0.35, "monochrome": 0.25, "hue_shift": 0.0, "vignette": 0.55, "static_pan_zoom": 0.25},
+        effect_timing={"pixelate": "Random", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Random", "shake": "Frame", "ghosting": "Frame", "monochrome": "Random", "hue_shift": "Clip", "vignette": "Clip", "static_pan_zoom": "Clip"},
     ),
     "Ambient Drift": make_style(
         duration=1.0,
@@ -279,6 +283,7 @@ BUILTIN_STYLES = {
         beat_variation=0.05,
         effects_enabled={"pixelate": False, "rewind": False, "shake": False, "monochrome": True, "vignette": True, "static_pan_zoom": True},
         effect_amounts={"pixelate": 0.0, "flash": 0.1, "rewind": 0.0, "rgb_shift": 0.12, "shake": 0.0, "ghosting": 1.2, "monochrome": 0.35, "hue_shift": 0.0, "vignette": 0.3, "static_pan_zoom": 0.75},
+        effect_timing={"pixelate": "Clip", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Clip", "shake": "Clip", "ghosting": "Clip", "monochrome": "Clip", "hue_shift": "Clip", "vignette": "Clip", "static_pan_zoom": "Clip"},
         primary_focus=0.95,
     ),
     "Glitch Heavy": make_style(
@@ -291,6 +296,7 @@ BUILTIN_STYLES = {
         beat_variation=0.0,
         effects_enabled={"hue_shift": True, "vignette": True},
         effect_amounts={"pixelate": 1.7, "flash": 1.15, "rewind": 0.8, "rgb_shift": 1.8, "shake": 1.4, "ghosting": 1.0, "monochrome": 0.0, "hue_shift": 0.9, "vignette": 0.65, "static_pan_zoom": 0.2},
+        effect_timing={"pixelate": "Random", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Random", "shake": "Frame", "ghosting": "Random", "monochrome": "Clip", "hue_shift": "Random", "vignette": "Random", "static_pan_zoom": "Clip"},
     ),
 }
 
@@ -608,6 +614,12 @@ class GlitchProcessor:
 
     def effect_uses_frame_timing(self, name):
         return self.effect_timing.get(name, DEFAULT_EFFECT_TIMING.get(name, "Frame")) == "Frame"
+
+    def resolve_effect_frame_timing(self, name):
+        timing = self.effect_timing.get(name, DEFAULT_EFFECT_TIMING.get(name, "Frame"))
+        if timing == "Random":
+            return random.choice((True, False))
+        return timing == "Frame"
 
     def export_quality_args(self):
         return EXPORT_QUALITY_LABELS.get(
@@ -1003,14 +1015,14 @@ class GlitchProcessor:
                 hue_shift_amount = self.effect_amount("hue_shift")
                 vignette_amount = self.effect_amount("vignette")
                 static_pan_zoom_amount = self.effect_amount("static_pan_zoom")
-                pixelate_frame_timing = self.effect_uses_frame_timing("pixelate")
-                flash_frame_timing = self.effect_uses_frame_timing("flash")
-                rgb_shift_frame_timing = self.effect_uses_frame_timing("rgb_shift")
-                shake_frame_timing = self.effect_uses_frame_timing("shake")
-                ghosting_frame_timing = self.effect_uses_frame_timing("ghosting")
-                monochrome_frame_timing = self.effect_uses_frame_timing("monochrome")
-                hue_shift_frame_timing = self.effect_uses_frame_timing("hue_shift")
-                vignette_frame_timing = self.effect_uses_frame_timing("vignette")
+                pixelate_frame_timing = self.resolve_effect_frame_timing("pixelate")
+                flash_frame_timing = self.resolve_effect_frame_timing("flash")
+                rgb_shift_frame_timing = self.resolve_effect_frame_timing("rgb_shift")
+                shake_frame_timing = self.resolve_effect_frame_timing("shake")
+                ghosting_frame_timing = self.resolve_effect_frame_timing("ghosting")
+                monochrome_frame_timing = self.resolve_effect_frame_timing("monochrome")
+                hue_shift_frame_timing = self.resolve_effect_frame_timing("hue_shift")
+                vignette_frame_timing = self.resolve_effect_frame_timing("vignette")
                 motion_score = self.segment_motion_score(motion_db, self.current_vid_idx, start_frame, len(chunk))
                 use_static_pan_zoom = (
                     self.static_pan_zoom
