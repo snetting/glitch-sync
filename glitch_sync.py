@@ -139,6 +139,21 @@ def apply_cube_lut(frame, lut):
     return cv2.cvtColor(graded, cv2.COLOR_RGB2BGR)
 
 
+def fit_frame_to_output(frame, width, height):
+    src_h, src_w = frame.shape[:2]
+    if src_w == width and src_h == height:
+        return frame
+    scale = min(width / max(src_w, 1), height / max(src_h, 1))
+    new_w = max(1, int(round(src_w * scale)))
+    new_h = max(1, int(round(src_h * scale)))
+    resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR)
+    fitted = np.zeros((height, width, 3), dtype=frame.dtype)
+    x = (width - new_w) // 2
+    y = (height - new_h) // 2
+    fitted[y:y + new_h, x:x + new_w] = resized
+    return fitted
+
+
 def match_lab_color(frame, source_stats, reference_stats, strength):
     if not source_stats or not reference_stats or strength <= 0:
         return frame
@@ -1026,7 +1041,7 @@ class GlitchProcessor:
                     monochrome_mids = frame_mids if monochrome_frame_timing else clip_mids
                     hue_shift_highs = frame_highs if hue_shift_frame_timing else clip_highs
                     vignette_bass = frame_bass if vignette_frame_timing else clip_bass
-                    if f.shape[:2] != (height, width): f = cv2.resize(f, (width, height))
+                    f = fit_frame_to_output(f, width, height)
                     if use_static_pan_zoom:
                         progress = frame_idx / max(1, len(chunk) - 1)
                         f = apply_static_pan_zoom(f, progress, static_pan_zoom_amount, pan_x, pan_y)
