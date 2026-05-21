@@ -17,6 +17,7 @@ Audio-reactive video glitch tool that synchronizes video cuts and visual effects
   - **Rewind**: Stutter/rewind effects on intense peaks.
 - **Per-Effect Amount and Timing Controls**: Fine tune each enabled effect independently and choose whether audio-reactive calculations use frame-wide timing or one averaged clip-wide value.
 - **Beat Interval and Variation**: Cut every N beats during Beat Sync, with optional extra cuts on skipped beats for variety.
+- **One-Bar Default Pacing**: New projects default to a 4-beat interval, which corresponds to one bar in typical 4/4 music.
 - **Duration Control**: When Beat Sync is off, set fixed edit lengths from 0 to 8 seconds.
 - **Output Resolution Presets**: Use the first input's resolution automatically, or override to 480p, 720p, 1080p, 4K, or 8K.
 - **Export Quality Presets**: Choose master quality, high quality, balanced, or fast preview encoding for final MP4 and cut-aware Shotcut exports.

@@ -51,7 +51,18 @@ EFFECT_NAMES = (
     "pixelate", "flash", "rewind", "rgb_shift", "shake", "ghosting",
     "monochrome", "hue_shift", "vignette", "static_pan_zoom",
 )
-DEFAULT_EFFECT_AMOUNTS = {name: 1.0 for name in EFFECT_NAMES}
+DEFAULT_EFFECT_AMOUNTS = {
+    "pixelate": 0.7,
+    "flash": 0.6,
+    "rewind": 0.25,
+    "rgb_shift": 0.6,
+    "shake": 0.5,
+    "ghosting": 0.55,
+    "monochrome": 0.35,
+    "hue_shift": 0.35,
+    "vignette": 0.45,
+    "static_pan_zoom": 0.4,
+}
 EFFECT_TIMING_LABELS = ("Frame", "Clip")
 DEFAULT_EFFECT_TIMING = {
     "pixelate": "Frame",
@@ -142,10 +153,10 @@ def match_lab_color(frame, source_stats, reference_stats, strength):
 
 
 def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=True,
-               beat_step=1, beat_variation=0.0, effects_enabled=None,
+               beat_step=4, beat_variation=0.0, effects_enabled=None,
                effect_amounts=None, effect_timing=None,
                primary_enabled=False, primary_focus=0.75,
-               export_mode_label="Final video (MP4)", source_variety=0.0, music_match=0.0,
+               export_mode_label="Final video (MP4)", source_variety=0.0, music_match=0.35,
                color_match_enabled=False, color_match_strength=0.5,
                output_resolution_label="Auto (first input)",
                export_quality_label="High quality (slower)", render_mode="Full",
@@ -205,8 +216,8 @@ BUILTIN_STYLES = {
         color_match_strength=0.55,
         beat_step=8,
         beat_variation=0.12,
-        effects_enabled={"static_pan_zoom": True},
-        effect_amounts={"pixelate": 0.25, "flash": 0.25, "rewind": 0.1, "rgb_shift": 0.3, "shake": 0.2, "ghosting": 0.7, "static_pan_zoom": 0.45},
+        effects_enabled={"monochrome": True, "vignette": True, "static_pan_zoom": True},
+        effect_amounts={"pixelate": 0.25, "flash": 0.18, "rewind": 0.1, "rgb_shift": 0.2, "shake": 0.15, "ghosting": 0.7, "monochrome": 0.28, "hue_shift": 0.0, "vignette": 0.35, "static_pan_zoom": 0.45},
         primary_focus=0.9,
     ),
     "Pop Performance": make_style(
@@ -217,7 +228,8 @@ BUILTIN_STYLES = {
         color_match_strength=0.5,
         beat_step=4,
         beat_variation=0.25,
-        effect_amounts={"pixelate": 0.5, "flash": 0.55, "rewind": 0.2, "rgb_shift": 0.65, "shake": 0.45, "ghosting": 0.5, "static_pan_zoom": 0.35},
+        effects_enabled={"hue_shift": True, "vignette": True},
+        effect_amounts={"pixelate": 0.5, "flash": 0.55, "rewind": 0.2, "rgb_shift": 0.65, "shake": 0.45, "ghosting": 0.5, "monochrome": 0.0, "hue_shift": 0.22, "vignette": 0.25, "static_pan_zoom": 0.35},
     ),
     "EDM Pulse": make_style(
         coherence=0.35,
@@ -227,7 +239,8 @@ BUILTIN_STYLES = {
         color_match_strength=0.45,
         beat_step=2,
         beat_variation=0.45,
-        effect_amounts={"pixelate": 1.2, "flash": 1.35, "rewind": 0.45, "rgb_shift": 1.25, "shake": 1.1, "ghosting": 0.65, "static_pan_zoom": 0.25},
+        effects_enabled={"hue_shift": True, "vignette": True},
+        effect_amounts={"pixelate": 1.2, "flash": 1.25, "rewind": 0.45, "rgb_shift": 1.25, "shake": 1.1, "ghosting": 0.65, "monochrome": 0.0, "hue_shift": 0.75, "vignette": 0.45, "static_pan_zoom": 0.25},
     ),
     "Rock Punch": make_style(
         coherence=0.5,
@@ -237,7 +250,8 @@ BUILTIN_STYLES = {
         color_match_strength=0.45,
         beat_step=2,
         beat_variation=0.25,
-        effect_amounts={"pixelate": 0.65, "flash": 0.7, "rewind": 0.25, "rgb_shift": 0.75, "shake": 1.25, "ghosting": 0.35, "static_pan_zoom": 0.25},
+        effects_enabled={"monochrome": True, "vignette": True},
+        effect_amounts={"pixelate": 0.65, "flash": 0.6, "rewind": 0.25, "rgb_shift": 0.65, "shake": 1.25, "ghosting": 0.35, "monochrome": 0.25, "hue_shift": 0.0, "vignette": 0.55, "static_pan_zoom": 0.25},
     ),
     "Ambient Drift": make_style(
         duration=1.0,
@@ -248,8 +262,8 @@ BUILTIN_STYLES = {
         color_match_strength=0.6,
         beat_step=16,
         beat_variation=0.05,
-        effects_enabled={"pixelate": False, "rewind": False, "shake": False, "static_pan_zoom": True},
-        effect_amounts={"pixelate": 0.0, "flash": 0.15, "rewind": 0.0, "rgb_shift": 0.2, "shake": 0.0, "ghosting": 1.2, "static_pan_zoom": 0.75},
+        effects_enabled={"pixelate": False, "rewind": False, "shake": False, "monochrome": True, "vignette": True, "static_pan_zoom": True},
+        effect_amounts={"pixelate": 0.0, "flash": 0.1, "rewind": 0.0, "rgb_shift": 0.12, "shake": 0.0, "ghosting": 1.2, "monochrome": 0.35, "hue_shift": 0.0, "vignette": 0.3, "static_pan_zoom": 0.75},
         primary_focus=0.95,
     ),
     "Glitch Heavy": make_style(
@@ -260,7 +274,8 @@ BUILTIN_STYLES = {
         color_match_strength=0.35,
         beat_step=1,
         beat_variation=0.0,
-        effect_amounts={"pixelate": 1.7, "flash": 1.2, "rewind": 0.8, "rgb_shift": 1.8, "shake": 1.4, "ghosting": 1.0, "static_pan_zoom": 0.2},
+        effects_enabled={"hue_shift": True, "vignette": True},
+        effect_amounts={"pixelate": 1.7, "flash": 1.15, "rewind": 0.8, "rgb_shift": 1.8, "shake": 1.4, "ghosting": 1.0, "monochrome": 0.0, "hue_shift": 0.9, "vignette": 0.65, "static_pan_zoom": 0.2},
     ),
 }
 
@@ -530,8 +545,8 @@ class GlitchProcessor:
                  export_mode=EXPORT_FINAL_VIDEO,
                  progress_callback=None, log_callback=None, frame_callback=None,
                  effect_amounts=None, primary_video_idx=None, primary_focus=0.0,
-                 beat_step=1, beat_variation=0.0, render_limit=None,
-                 source_variety=0.0, music_match=0.0,
+                 beat_step=4, beat_variation=0.0, render_limit=None,
+                 source_variety=0.0, music_match=0.35,
                  color_reference_idx=None, color_match_strength=0.0,
                  lut_path="", output_resolution=None, export_quality_label="High quality (slower)",
                  effect_timing=None):
@@ -1168,7 +1183,7 @@ class GlitchGUI:
         self.duration, self.fps, self.coherence, self.sensitivity = tk.DoubleVar(value=0.10), tk.IntVar(value=30), tk.DoubleVar(value=0.20), tk.DoubleVar(value=1.0)
         self.source_variety = tk.DoubleVar(value=0.0)
         self.source_variety_label = None
-        self.music_match = tk.DoubleVar(value=0.0)
+        self.music_match = tk.DoubleVar(value=0.35)
         self.music_match_label = None
         self.color_match_enabled = tk.BooleanVar(value=False)
         self.color_match_strength = tk.DoubleVar(value=0.5)
@@ -1178,10 +1193,10 @@ class GlitchGUI:
         self.lut_path = tk.StringVar()
         self.render_mode = tk.StringVar(value="Full")
         self.snippet_duration = tk.DoubleVar(value=30.0)
-        self.beat_step = tk.IntVar(value=1)
+        self.beat_step = tk.IntVar(value=4)
         self.beat_variation = tk.DoubleVar(value=0.0)
         self.beat_variation_label = None
-        self.effect_amounts = {name: tk.DoubleVar(value=1.0) for name in EFFECT_NAMES}
+        self.effect_amounts = {name: tk.DoubleVar(value=DEFAULT_EFFECT_AMOUNTS[name]) for name in EFFECT_NAMES}
         self.effect_timing = {name: tk.StringVar(value=DEFAULT_EFFECT_TIMING[name]) for name in EFFECT_NAMES}
         self.effect_amount_labels = {}
         self.primary_enabled = tk.BooleanVar(value=False)
@@ -1335,7 +1350,7 @@ class GlitchGUI:
         self.source_variety_label = ttk.Label(set_f, text="0.00"); self.source_variety_label.grid(row=5, column=2)
         ttk.Label(set_f, text="Music match:").grid(row=6, column=0)
         ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.music_match, command=lambda e: self.update_music_match_label()).grid(row=6, column=1, sticky="ew")
-        self.music_match_label = ttk.Label(set_f, text="0.00"); self.music_match_label.grid(row=6, column=2)
+        self.music_match_label = ttk.Label(set_f, text="0.35"); self.music_match_label.grid(row=6, column=2)
         ttk.Label(set_f, text="Sensitivity:").grid(row=7, column=0)
         ttk.Scale(set_f, from_=0.1, to=3.0, variable=self.sensitivity, command=lambda e: self.l_sen.config(text=f"{self.sensitivity.get():.2f}")).grid(row=7, column=1, sticky="ew")
         self.l_sen = ttk.Label(set_f, text="1.00"); self.l_sen.grid(row=7, column=2)
@@ -1852,10 +1867,10 @@ if __name__ == "__main__":
     p.add_argument("--inputs", nargs='+'); p.add_argument("--audio"); p.add_argument("--output", default="output.mp4"); p.add_argument("--beat_sync", action="store_true"); p.add_argument("--gui", action="store_true")
     p.add_argument("--export-mode", choices=[EXPORT_FINAL_VIDEO, EXPORT_CUT_AWARE_MLT, EXPORT_CLIP_MLT], default=EXPORT_FINAL_VIDEO)
     p.add_argument("--export-quality", choices=list(EXPORT_QUALITY_LABELS.keys()), default="High quality (slower)")
-    p.add_argument("--beat-step", type=int, default=1)
+    p.add_argument("--beat-step", type=int, default=4)
     p.add_argument("--beat-variation", type=float, default=0.0)
     p.add_argument("--render-limit", type=float)
-    p.add_argument("--music-match", type=float, default=0.0)
+    p.add_argument("--music-match", type=float, default=0.35)
     args = p.parse_args()
     if args.gui or not (args.inputs and args.audio):
         r = tk.Tk(); g = GlitchGUI(r); r.mainloop()
