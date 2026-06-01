@@ -1485,8 +1485,8 @@ class GlitchProcessor:
                         f = apply_monochrome(f, monochrome_mids, self.sensitivity, monochrome_amount)
                     if self.hue_shift and hue_shift_amount > 0:
                         f = apply_hue_shift(f, hue_shift_highs, self.sensitivity, hue_shift_amount)
-                if self.vignette and vignette_amount > 0:
-                    f = apply_vignette(f, vignette_bass, self.sensitivity, vignette_amount)
+                    if self.vignette and vignette_amount > 0:
+                        f = apply_vignette(f, vignette_bass, self.sensitivity, vignette_amount)
                     if self.ai_stylization_active():
                         if self.ai_segment_anchor_only:
                             if ai_anchor is None:
