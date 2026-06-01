@@ -89,8 +89,8 @@ ANALYSIS_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "glitchsync
 STATIC_MOTION_THRESHOLD = 0.018
 LAB_EPSILON = 1e-6
 AI_DEFAULT_BACKEND_URL = "http://127.0.0.1:9000"
-AI_DEFAULT_PROMPT = "hand drawn illustration, expressive linework, textured paper"
-AI_DEFAULT_NEGATIVE_PROMPT = "blurry, low quality, watermark, text, deformed, extra fingers"
+AI_DEFAULT_PROMPT = "hand drawn illustration, expressive linework"
+AI_DEFAULT_NEGATIVE_PROMPT = "blurry, low quality, watermark, text"
 AI_DEFAULT_EVERY_N_FRAMES = 12
 AI_DEFAULT_DENOISE = 0.32
 AI_DEFAULT_CFG_SCALE = 6.5
@@ -1495,26 +1495,28 @@ class GlitchProcessor:
                                     self.log(f"  AI anchor generated for segment {i + 1}/{len(cut_times)}")
                                 else:
                                     ai_anchor = None
+                        else:
+                            should_refresh_ai = (
+                                ai_anchor is None
+                                or frame_idx == 0
+                                or (frame_idx - ai_anchor_frame_idx) >= self.ai_every_n_frames
+                            )
+                            if should_refresh_ai:
+                                ai_anchor, ai_ok = self.ai_render_frame(f)
+                                if ai_ok:
+                                    ai_anchor_frame_idx = frame_idx
+                                    self.log(f"  AI frame refreshed at segment {i + 1}/{len(cut_times)} frame {frame_idx + 1}/{len(chunk)}")
+                                else:
+                                    ai_anchor = None
                         if ai_anchor is not None and self.ai_blend > 0:
-                            f = cv2.addWeighted(f, 1 - self.ai_blend, ai_anchor, self.ai_blend, 0)
-                    else:
-                        should_refresh_ai = (
-                            ai_anchor is None
-                            or frame_idx == 0
-                            or (frame_idx - ai_anchor_frame_idx) >= self.ai_every_n_frames
-                        )
-                        if should_refresh_ai:
-                            ai_anchor, ai_ok = self.ai_render_frame(f)
-                            if ai_ok:
-                                ai_anchor_frame_idx = frame_idx
+                            if self.ai_segment_anchor_only:
+                                f = cv2.addWeighted(f, 1 - self.ai_blend, ai_anchor, self.ai_blend, 0)
                             else:
-                                ai_anchor = None
-                        if ai_anchor is not None:
-                            since_anchor = max(0, frame_idx - ai_anchor_frame_idx)
-                            interval_progress = np.clip(since_anchor / max(1, self.ai_every_n_frames), 0, 1)
-                            blend = self.ai_blend * (1.0 - (interval_progress * 0.5))
-                            if blend > 0:
-                                f = cv2.addWeighted(f, 1 - blend, ai_anchor, blend, 0)
+                                since_anchor = max(0, frame_idx - ai_anchor_frame_idx)
+                                interval_progress = np.clip(since_anchor / max(1, self.ai_every_n_frames), 0, 1)
+                                blend = self.ai_blend * (1.0 - (interval_progress * 0.5))
+                                if blend > 0:
+                                    f = cv2.addWeighted(f, 1 - blend, ai_anchor, blend, 0)
                     if self.lut is not None:
                         f = apply_cube_lut(f, self.lut)
                     out.write(f)
