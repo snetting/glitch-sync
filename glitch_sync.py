@@ -86,7 +86,7 @@ ANALYSIS_CACHE_VERSION = "4"
 ANALYSIS_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "glitchsync", "analysis")
 STATIC_MOTION_THRESHOLD = 0.018
 LAB_EPSILON = 1e-6
-AI_DEFAULT_BACKEND_URL = "http://127.0.0.1:7860"
+AI_DEFAULT_BACKEND_URL = "http://127.0.0.1:9000"
 AI_DEFAULT_PROMPT = "hand drawn illustration, expressive linework, textured paper"
 AI_DEFAULT_NEGATIVE_PROMPT = "blurry, low quality, watermark, text, deformed, extra fingers"
 AI_DEFAULT_EVERY_N_FRAMES = 12
@@ -794,7 +794,7 @@ class GlitchProcessor:
 
     def ai_stylize_frame(self, frame):
         if not self.ai_stylization_active():
-            return frame
+            return frame, False
         try:
             target_width, target_height = self.ai_target_size(frame)
             resized = cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
@@ -825,12 +825,13 @@ class GlitchProcessor:
             stylized = base64_png_to_frame(images[0], (target_width, target_height))
             if stylized.shape[1] != frame.shape[1] or stylized.shape[0] != frame.shape[0]:
                 stylized = cv2.resize(stylized, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_LINEAR)
-            return stylized
+            return stylized, True
         except Exception as exc:
             if not self.ai_backend_warning_shown:
                 self.log(f"  AI stylization disabled for this render: {exc}")
+                self.log("  Check that the backend is running and reachable at the configured URL (Easy Diffusion usually defaults to port 9000).")
                 self.ai_backend_warning_shown = True
-            return frame
+            return frame, False
 
     @staticmethod
     def describe_audio_style(audio_features):
@@ -1383,11 +1384,14 @@ class GlitchProcessor:
                         f = apply_hue_shift(f, hue_shift_highs, self.sensitivity, hue_shift_amount)
                 if self.vignette and vignette_amount > 0:
                     f = apply_vignette(f, vignette_bass, self.sensitivity, vignette_amount)
-                if self.ai_stylization_active():
-                    if self.ai_segment_anchor_only:
-                        if ai_anchor is None:
-                            ai_anchor = self.ai_stylize_frame(f)
-                            self.log(f"  AI anchor generated for segment {i + 1}/{len(cut_times)}")
+                    if self.ai_stylization_active():
+                        if self.ai_segment_anchor_only:
+                            if ai_anchor is None:
+                                ai_anchor, ai_ok = self.ai_stylize_frame(f)
+                                if ai_ok:
+                                    self.log(f"  AI anchor generated for segment {i + 1}/{len(cut_times)}")
+                                else:
+                                    ai_anchor = None
                         if ai_anchor is not None and self.ai_blend > 0:
                             f = cv2.addWeighted(f, 1 - self.ai_blend, ai_anchor, self.ai_blend, 0)
                     else:
@@ -1397,8 +1401,11 @@ class GlitchProcessor:
                             or (frame_idx - ai_anchor_frame_idx) >= self.ai_every_n_frames
                         )
                         if should_refresh_ai:
-                            ai_anchor = self.ai_stylize_frame(f)
-                            ai_anchor_frame_idx = frame_idx
+                            ai_anchor, ai_ok = self.ai_stylize_frame(f)
+                            if ai_ok:
+                                ai_anchor_frame_idx = frame_idx
+                            else:
+                                ai_anchor = None
                         if ai_anchor is not None:
                             since_anchor = max(0, frame_idx - ai_anchor_frame_idx)
                             interval_progress = np.clip(since_anchor / max(1, self.ai_every_n_frames), 0, 1)
