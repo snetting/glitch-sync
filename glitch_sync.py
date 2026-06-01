@@ -98,6 +98,7 @@ AI_DEFAULT_STEPS = 10
 AI_DEFAULT_MAX_DIM = 512
 AI_DEFAULT_BLEND = 0.35
 AI_DEFAULT_SESSION = "glitchsync"
+AI_DEFAULT_MODEL_FALLBACK = "sd-v1-4"
 
 
 class ToolTip:
@@ -742,6 +743,7 @@ class GlitchProcessor:
         self.ai_blend = float(np.clip(ai_blend, 0.0, 1.0))
         self.ai_session = requests.Session()
         self.ai_backend_warning_shown = False
+        self.ai_backend_model_warning_shown = False
         self.effect_amounts = DEFAULT_EFFECT_AMOUNTS.copy()
         if effect_amounts:
             for name in EFFECT_NAMES:
@@ -783,6 +785,39 @@ class GlitchProcessor:
     def ai_stylization_active(self):
         return self.ai_enabled and bool(self.ai_backend_url) and bool(self.ai_prompt)
 
+    def ai_backend_base_url(self):
+        return self.ai_backend_url.rstrip("/")
+
+    def ai_backend_app_config(self):
+        response = self.ai_session.get(f"{self.ai_backend_base_url()}/get/app_config", timeout=(10, 30))
+        response.raise_for_status()
+        return response.json()
+
+    def ai_backend_model_selection(self):
+        config = self.ai_backend_app_config()
+        model_config = config.get("model") or {}
+        stable_diffusion_model = model_config.get("stable-diffusion")
+        vae_model = model_config.get("vae")
+
+        if stable_diffusion_model:
+            return stable_diffusion_model, vae_model
+
+        response = self.ai_session.get(f"{self.ai_backend_base_url()}/get/models", timeout=(10, 30))
+        response.raise_for_status()
+        models_data = response.json().get("models") or []
+        stable_diffusion_models = [
+            model_info.get("model")
+            for model_info in models_data
+            if "stable-diffusion" in (model_info.get("tags") or []) and model_info.get("model")
+        ]
+        if stable_diffusion_models:
+            return stable_diffusion_models[0], vae_model
+
+        if not self.ai_backend_model_warning_shown:
+            self.log("  Easy Diffusion did not report a configured stable-diffusion model; using a bundled default.")
+            self.ai_backend_model_warning_shown = True
+        return AI_DEFAULT_MODEL_FALLBACK, vae_model
+
     def ai_target_size(self, frame):
         height, width = frame.shape[:2]
         if max(width, height) <= self.ai_max_dim:
@@ -801,6 +836,7 @@ class GlitchProcessor:
         try:
             target_width, target_height = self.ai_target_size(frame)
             resized = cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
+            stable_diffusion_model, vae_model = self.ai_backend_model_selection()
             payload = {
                 "prompt": self.ai_prompt,
                 "negative_prompt": self.ai_negative_prompt,
@@ -812,7 +848,11 @@ class GlitchProcessor:
                 "guidance_scale": self.ai_cfg_scale,
                 "prompt_strength": self.ai_denoise,
                 "init_image": frame_to_base64_png(resized),
+                "mask": "",
                 "preserve_init_image_color_profile": False,
+                "sampler_name": "ddim",
+                "use_stable_diffusion_model": stable_diffusion_model,
+                "use_vae_model": vae_model,
                 "request_id": f"glitchsync_{random.randint(100000, 999999)}",
                 "session_id": AI_DEFAULT_SESSION,
                 "vram_usage_level": "balanced",
@@ -820,8 +860,9 @@ class GlitchProcessor:
                 "output_quality": 100,
                 "output_lossless": True,
             }
+            self.log(f"  Easy Diffusion model: {stable_diffusion_model}")
             response = self.ai_session.post(
-                f"{self.ai_backend_url.rstrip('/')}/render",
+                f"{self.ai_backend_base_url()}/render",
                 json=payload,
                 timeout=(10, 30),
             )
@@ -830,8 +871,8 @@ class GlitchProcessor:
             task_id = render_data.get("task")
             if not task_id:
                 raise RuntimeError("Easy Diffusion did not return a task id")
-            ping_url = f"{self.ai_backend_url.rstrip('/')}/ping?session_id={AI_DEFAULT_SESSION}"
-            stream_url = f"{self.ai_backend_url.rstrip('/')}/image/stream/{task_id}"
+            ping_url = f"{self.ai_backend_base_url()}/ping?session_id={AI_DEFAULT_SESSION}"
+            stream_url = f"{self.ai_backend_base_url()}/image/stream/{task_id}"
             deadline = time.time() + 180
             last_status = None
             while time.time() < deadline:
