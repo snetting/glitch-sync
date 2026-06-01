@@ -1650,10 +1650,13 @@ class GlitchGUI:
         self.ai_negative_prompt = tk.StringVar(value=AI_DEFAULT_NEGATIVE_PROMPT)
         self.ai_every_n_frames = tk.IntVar(value=AI_DEFAULT_EVERY_N_FRAMES)
         self.ai_denoise = tk.DoubleVar(value=AI_DEFAULT_DENOISE)
+        self.ai_denoise_label = None
         self.ai_cfg_scale = tk.DoubleVar(value=AI_DEFAULT_CFG_SCALE)
+        self.ai_cfg_scale_label = None
         self.ai_steps = tk.IntVar(value=AI_DEFAULT_STEPS)
         self.ai_max_dim = tk.IntVar(value=AI_DEFAULT_MAX_DIM)
         self.ai_blend = tk.DoubleVar(value=AI_DEFAULT_BLEND)
+        self.ai_blend_label = None
         self.duration, self.fps, self.coherence, self.sensitivity = tk.DoubleVar(value=0.10), tk.IntVar(value=30), tk.DoubleVar(value=0.20), tk.DoubleVar(value=1.0)
         self.source_variety = tk.DoubleVar(value=0.0)
         self.source_variety_label = None
@@ -1883,11 +1886,21 @@ class GlitchGUI:
         ai_every_spin = ttk.Spinbox(self.ai_frame, from_=1, to=120, textvariable=self.ai_every_n_frames, width=6)
         ai_every_spin.grid(row=4, column=1, sticky="w")
         ttk.Label(self.ai_frame, text="Denoise:").grid(row=5, column=0, sticky="w")
-        ai_denoise_scale = ttk.Scale(self.ai_frame, from_=0.05, to=0.95, variable=self.ai_denoise)
-        ai_denoise_scale.grid(row=5, column=1, sticky="ew")
+        ai_denoise_controls = ttk.Frame(self.ai_frame)
+        ai_denoise_controls.grid(row=5, column=1, sticky="ew")
+        ai_denoise_controls.columnconfigure(0, weight=1)
+        ai_denoise_scale = ttk.Scale(ai_denoise_controls, from_=0.05, to=0.95, variable=self.ai_denoise, command=lambda e: self.update_ai_denoise_label())
+        ai_denoise_scale.grid(row=0, column=0, sticky="ew")
+        self.ai_denoise_label = ttk.Label(ai_denoise_controls, text=f"{self.ai_denoise.get():.2f}", width=5)
+        self.ai_denoise_label.grid(row=0, column=1, sticky="w", padx=(8, 0))
         ttk.Label(self.ai_frame, text="CFG scale:").grid(row=6, column=0, sticky="w")
-        ai_cfg_scale = ttk.Scale(self.ai_frame, from_=1.0, to=20.0, variable=self.ai_cfg_scale)
-        ai_cfg_scale.grid(row=6, column=1, sticky="ew")
+        ai_cfg_controls = ttk.Frame(self.ai_frame)
+        ai_cfg_controls.grid(row=6, column=1, sticky="ew")
+        ai_cfg_controls.columnconfigure(0, weight=1)
+        ai_cfg_scale = ttk.Scale(ai_cfg_controls, from_=1.0, to=20.0, variable=self.ai_cfg_scale, command=lambda e: self.update_ai_cfg_scale_label())
+        ai_cfg_scale.grid(row=0, column=0, sticky="ew")
+        self.ai_cfg_scale_label = ttk.Label(ai_cfg_controls, text=f"{self.ai_cfg_scale.get():.2f}", width=5)
+        self.ai_cfg_scale_label.grid(row=0, column=1, sticky="w", padx=(8, 0))
         ttk.Label(self.ai_frame, text="Steps:").grid(row=7, column=0, sticky="w")
         ai_steps_spin = ttk.Spinbox(self.ai_frame, from_=1, to=40, textvariable=self.ai_steps, width=6)
         ai_steps_spin.grid(row=7, column=1, sticky="w")
@@ -1895,8 +1908,13 @@ class GlitchGUI:
         ai_max_dim_spin = ttk.Spinbox(self.ai_frame, from_=128, to=1024, increment=64, textvariable=self.ai_max_dim, width=6)
         ai_max_dim_spin.grid(row=8, column=1, sticky="w")
         ttk.Label(self.ai_frame, text="Blend strength:").grid(row=9, column=0, sticky="w")
-        ai_blend_scale = ttk.Scale(self.ai_frame, from_=0.0, to=1.0, variable=self.ai_blend)
-        ai_blend_scale.grid(row=9, column=1, sticky="ew")
+        ai_blend_controls = ttk.Frame(self.ai_frame)
+        ai_blend_controls.grid(row=9, column=1, sticky="ew")
+        ai_blend_controls.columnconfigure(0, weight=1)
+        ai_blend_scale = ttk.Scale(ai_blend_controls, from_=0.0, to=1.0, variable=self.ai_blend, command=lambda e: self.update_ai_blend_label())
+        ai_blend_scale.grid(row=0, column=0, sticky="ew")
+        self.ai_blend_label = ttk.Label(ai_blend_controls, text=f"{self.ai_blend.get():.2f}", width=5)
+        self.ai_blend_label.grid(row=0, column=1, sticky="w", padx=(8, 0))
         ai_segment_anchor = ttk.Checkbutton(self.ai_frame, text="Segment anchor only", variable=self.ai_segment_anchor_only)
         ai_segment_anchor.grid(row=10, column=0, sticky="w")
 
@@ -1911,6 +1929,9 @@ class GlitchGUI:
         self.add_tooltip(ai_max_dim_spin, "Downscale the AI input to cap VRAM usage and latency.")
         self.add_tooltip(ai_blend_scale, "How strongly the stylized anchor influences the final video frame.")
         self.add_tooltip(ai_segment_anchor, "When enabled, only one stylized anchor is generated per source segment.")
+        self.update_ai_denoise_label()
+        self.update_ai_cfg_scale_label()
+        self.update_ai_blend_label()
         if not self.ai_panel_visible.get():
             self.ai_frame.grid_remove()
 
@@ -1999,6 +2020,15 @@ class GlitchGUI:
     def update_color_match_strength_label(self):
         if self.color_match_strength_label:
             self.color_match_strength_label.config(text=f"{self.color_match_strength.get():.2f}")
+    def update_ai_denoise_label(self):
+        if self.ai_denoise_label:
+            self.ai_denoise_label.config(text=f"{self.ai_denoise.get():.2f}")
+    def update_ai_cfg_scale_label(self):
+        if self.ai_cfg_scale_label:
+            self.ai_cfg_scale_label.config(text=f"{self.ai_cfg_scale.get():.2f}")
+    def update_ai_blend_label(self):
+        if self.ai_blend_label:
+            self.ai_blend_label.config(text=f"{self.ai_blend.get():.2f}")
     def load_styles_file(self):
         try:
             with open(STYLE_CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -2286,6 +2316,9 @@ class GlitchGUI:
         self.update_source_variety_label()
         self.update_music_match_label()
         self.update_color_match_strength_label()
+        self.update_ai_denoise_label()
+        self.update_ai_cfg_scale_label()
+        self.update_ai_blend_label()
         self.update_primary_focus_label()
         self.toggle_ai_panel()
     def save_named_style(self):
