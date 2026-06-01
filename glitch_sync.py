@@ -16,6 +16,7 @@ import hashlib
 import bisect
 import base64
 import io
+import time
 from collections import deque
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
@@ -24,6 +25,7 @@ import tkinter as tk
 from datetime import datetime
 from PIL import Image, ImageTk
 import requests
+from requests import Response
 
 EXPORT_FINAL_VIDEO = "final_video"
 EXPORT_CUT_AWARE_MLT = "cut_aware_mlt"
@@ -95,6 +97,7 @@ AI_DEFAULT_CFG_SCALE = 6.5
 AI_DEFAULT_STEPS = 10
 AI_DEFAULT_MAX_DIM = 512
 AI_DEFAULT_BLEND = 0.35
+AI_DEFAULT_SESSION = "glitchsync"
 
 
 class ToolTip:
@@ -792,7 +795,7 @@ class GlitchProcessor:
             target_width = max(64, int(round(width * (self.ai_max_dim / max(height, 1)))))
         return target_width, target_height
 
-    def ai_stylize_frame(self, frame):
+    def ai_render_frame(self, frame):
         if not self.ai_stylization_active():
             return frame, False
         try:
@@ -801,35 +804,67 @@ class GlitchProcessor:
             payload = {
                 "prompt": self.ai_prompt,
                 "negative_prompt": self.ai_negative_prompt,
-                "steps": self.ai_steps,
-                "cfg_scale": self.ai_cfg_scale,
-                "denoising_strength": self.ai_denoise,
-                "sampler_name": "DPM++ 2M",
                 "seed": -1,
                 "width": target_width,
                 "height": target_height,
-                "batch_size": 1,
-                "n_iter": 1,
-                "init_images": [frame_to_base64_png(resized)],
+                "num_outputs": 1,
+                "num_inference_steps": self.ai_steps,
+                "guidance_scale": self.ai_cfg_scale,
+                "prompt_strength": self.ai_denoise,
+                "init_image": frame_to_base64_png(resized),
+                "preserve_init_image_color_profile": False,
+                "request_id": f"glitchsync_{random.randint(100000, 999999)}",
+                "session_id": AI_DEFAULT_SESSION,
+                "vram_usage_level": "balanced",
+                "output_format": "png",
+                "output_quality": 100,
+                "output_lossless": True,
             }
             response = self.ai_session.post(
-                f"{self.ai_backend_url.rstrip('/')}/sdapi/v1/img2img",
+                f"{self.ai_backend_url.rstrip('/')}/render",
                 json=payload,
-                timeout=(10, 180),
+                timeout=(10, 30),
             )
             response.raise_for_status()
-            data = response.json()
-            images = data.get("images") or []
-            if not images:
-                raise RuntimeError("AI backend returned no images")
-            stylized = base64_png_to_frame(images[0], (target_width, target_height))
-            if stylized.shape[1] != frame.shape[1] or stylized.shape[0] != frame.shape[0]:
-                stylized = cv2.resize(stylized, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_LINEAR)
-            return stylized, True
+            render_data = response.json()
+            task_id = render_data.get("task")
+            if not task_id:
+                raise RuntimeError("Easy Diffusion did not return a task id")
+            stream_url = f"{self.ai_backend_url.rstrip('/')}/image/stream/{task_id}"
+            deadline = time.time() + 180
+            while time.time() < deadline:
+                stream_response: Response = self.ai_session.get(stream_url, timeout=(10, 30))
+                if stream_response.status_code == 200:
+                    try:
+                        data = stream_response.json()
+                    except ValueError:
+                        data = None
+                    if isinstance(data, dict) and data.get("status") == "succeeded":
+                        images = data.get("output") or []
+                        if not images:
+                            raise RuntimeError("Easy Diffusion completed without returning an image")
+                        output_image = images[0]
+                        image_data = output_image.get("data")
+                        if not image_data:
+                            raise RuntimeError("Easy Diffusion response did not include image data")
+                        stylized = base64_png_to_frame(image_data, (target_width, target_height))
+                        if stylized.shape[1] != frame.shape[1] or stylized.shape[0] != frame.shape[0]:
+                            stylized = cv2.resize(stylized, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_LINEAR)
+                        return stylized, True
+                    if isinstance(data, dict) and data.get("status") in {"running", "pending", "buffer"}:
+                        time.sleep(0.5)
+                        continue
+                elif stream_response.status_code in (404, 425):
+                    time.sleep(0.5)
+                    continue
+                else:
+                    stream_response.raise_for_status()
+                time.sleep(0.5)
+            raise TimeoutError("Timed out waiting for Easy Diffusion to complete the stylization task")
         except Exception as exc:
             if not self.ai_backend_warning_shown:
                 self.log(f"  AI stylization disabled for this render: {exc}")
-                self.log("  Check that the backend is running and reachable at the configured URL (Easy Diffusion usually defaults to port 9000).")
+                self.log("  Check that Easy Diffusion is running and reachable at the configured URL.")
                 self.ai_backend_warning_shown = True
             return frame, False
 
@@ -1387,7 +1422,7 @@ class GlitchProcessor:
                     if self.ai_stylization_active():
                         if self.ai_segment_anchor_only:
                             if ai_anchor is None:
-                                ai_anchor, ai_ok = self.ai_stylize_frame(f)
+                                ai_anchor, ai_ok = self.ai_render_frame(f)
                                 if ai_ok:
                                     self.log(f"  AI anchor generated for segment {i + 1}/{len(cut_times)}")
                                 else:
@@ -1401,7 +1436,7 @@ class GlitchProcessor:
                             or (frame_idx - ai_anchor_frame_idx) >= self.ai_every_n_frames
                         )
                         if should_refresh_ai:
-                            ai_anchor, ai_ok = self.ai_stylize_frame(f)
+                            ai_anchor, ai_ok = self.ai_render_frame(f)
                             if ai_ok:
                                 ai_anchor_frame_idx = frame_idx
                             else:
@@ -1761,7 +1796,7 @@ class GlitchGUI:
         self.ai_frame.grid(row=13, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         self.ai_frame.columnconfigure(1, weight=1)
         ttk.Checkbutton(self.ai_frame, text="Enable AI stylization", variable=self.ai_enabled).grid(row=0, column=0, sticky="w")
-        ttk.Label(self.ai_frame, text="Backend URL:").grid(row=1, column=0, sticky="w")
+        ttk.Label(self.ai_frame, text="Easy Diffusion URL:").grid(row=1, column=0, sticky="w")
         ai_backend_entry = ttk.Entry(self.ai_frame, textvariable=self.ai_backend_url)
         ai_backend_entry.grid(row=1, column=1, sticky="ew")
         ttk.Label(self.ai_frame, text="Prompt:").grid(row=2, column=0, sticky="w")
@@ -1792,7 +1827,7 @@ class GlitchGUI:
         ai_segment_anchor.grid(row=10, column=0, sticky="w")
 
         self.add_tooltip(ai_toggle, "Show or hide the experimental AI stylization controls.")
-        self.add_tooltip(ai_backend_entry, "Base URL for a local A1111/Easy Diffusion WebUI-compatible img2img API.")
+        self.add_tooltip(ai_backend_entry, "Base URL for your local Easy Diffusion instance, usually http://127.0.0.1:9000.")
         self.add_tooltip(ai_prompt_entry, "Prompt sent to the image model for stylization.")
         self.add_tooltip(ai_negative_entry, "Negative prompt to suppress unwanted artifacts.")
         self.add_tooltip(ai_every_spin, "How often to refresh the AI anchor frame; higher values are faster.")
