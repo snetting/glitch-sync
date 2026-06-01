@@ -99,6 +99,10 @@ AI_DEFAULT_MAX_DIM = 512
 AI_DEFAULT_BLEND = 0.35
 AI_DEFAULT_SESSION = "glitchsync"
 AI_DEFAULT_MODEL_FALLBACK = "sd-v1-4"
+AI_OBSOLETE_NEGATIVE_PROMPTS = {
+    "blurry, low quality, watermark, text, deformed, extra fingers",
+    "blurry, low quality, watermark, text, deformed",
+}
 
 
 class ToolTip:
@@ -2006,13 +2010,22 @@ class GlitchGUI:
             print(f"Could not load styles: {e}")
             styles = {}
         return self.with_builtin_styles(styles)
+    def normalize_ai_settings(self, settings):
+        if not isinstance(settings, dict):
+            return settings
+        ai_negative_prompt = settings.get("ai_negative_prompt")
+        if isinstance(ai_negative_prompt, str) and ai_negative_prompt.strip().rstrip(",") in AI_OBSOLETE_NEGATIVE_PROMPTS:
+            settings = dict(settings)
+            settings["ai_negative_prompt"] = AI_DEFAULT_NEGATIVE_PROMPT
+        return settings
     def with_builtin_styles(self, styles):
         deleted = set(styles.get("_deleted_builtin_styles", []))
         merged = json.loads(json.dumps({
             name: style for name, style in BUILTIN_STYLES.items()
             if name == DEFAULT_STYLE_NAME or name not in deleted
         }))
-        merged.update(styles)
+        for name, style in styles.items():
+            merged[name] = self.normalize_ai_settings(style) if isinstance(style, dict) else style
         merged[DEFAULT_STYLE_NAME] = json.loads(json.dumps(BUILTIN_STYLES[DEFAULT_STYLE_NAME]))
         return merged
     def save_styles_file(self):
@@ -2221,7 +2234,7 @@ class GlitchGUI:
         self.ai_segment_anchor_only.set(settings.get("ai_segment_anchor_only", self.ai_segment_anchor_only.get()))
         self.ai_backend_url.set(settings.get("ai_backend_url", self.ai_backend_url.get()))
         self.ai_prompt.set(settings.get("ai_prompt", self.ai_prompt.get()))
-        self.ai_negative_prompt.set(settings.get("ai_negative_prompt", self.ai_negative_prompt.get()))
+        self.ai_negative_prompt.set(self.normalize_ai_settings(settings).get("ai_negative_prompt", self.ai_negative_prompt.get()))
         self.ai_every_n_frames.set(settings.get("ai_every_n_frames", self.ai_every_n_frames.get()))
         self.ai_denoise.set(settings.get("ai_denoise", self.ai_denoise.get()))
         self.ai_cfg_scale.set(settings.get("ai_cfg_scale", self.ai_cfg_scale.get()))
