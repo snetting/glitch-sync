@@ -830,35 +830,36 @@ class GlitchProcessor:
             task_id = render_data.get("task")
             if not task_id:
                 raise RuntimeError("Easy Diffusion did not return a task id")
+            ping_url = f"{self.ai_backend_url.rstrip('/')}/ping?session_id={AI_DEFAULT_SESSION}"
             stream_url = f"{self.ai_backend_url.rstrip('/')}/image/stream/{task_id}"
             deadline = time.time() + 180
+            last_status = None
             while time.time() < deadline:
-                stream_response: Response = self.ai_session.get(stream_url, timeout=(10, 30))
-                if stream_response.status_code == 200:
-                    try:
-                        data = stream_response.json()
-                    except ValueError:
-                        data = None
-                    if isinstance(data, dict) and data.get("status") == "succeeded":
-                        images = data.get("output") or []
-                        if not images:
-                            raise RuntimeError("Easy Diffusion completed without returning an image")
-                        output_image = images[0]
-                        image_data = output_image.get("data")
-                        if not image_data:
-                            raise RuntimeError("Easy Diffusion response did not include image data")
-                        stylized = base64_png_to_frame(image_data, (target_width, target_height))
-                        if stylized.shape[1] != frame.shape[1] or stylized.shape[0] != frame.shape[0]:
-                            stylized = cv2.resize(stylized, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_LINEAR)
-                        return stylized, True
-                    if isinstance(data, dict) and data.get("status") in {"running", "pending", "buffer"}:
-                        time.sleep(0.5)
-                        continue
-                elif stream_response.status_code in (404, 425):
-                    time.sleep(0.5)
-                    continue
-                else:
+                ping_response: Response = self.ai_session.get(ping_url, timeout=(10, 30))
+                ping_response.raise_for_status()
+                ping_data = ping_response.json()
+                tasks = ping_data.get("tasks") or {}
+                task_status = tasks.get(str(task_id))
+                if task_status != last_status:
+                    self.log(f"  Easy Diffusion task {task_id} status: {task_status or ping_data.get('status')}")
+                    last_status = task_status
+                if task_status == "completed":
+                    stream_response: Response = self.ai_session.get(stream_url, timeout=(10, 30))
                     stream_response.raise_for_status()
+                    data = stream_response.json()
+                    images = data.get("output") or []
+                    if not images:
+                        raise RuntimeError("Easy Diffusion completed without returning an image")
+                    output_image = images[0]
+                    image_data = output_image.get("data")
+                    if not image_data:
+                        raise RuntimeError("Easy Diffusion response did not include image data")
+                    stylized = base64_png_to_frame(image_data, (target_width, target_height))
+                    if stylized.shape[1] != frame.shape[1] or stylized.shape[0] != frame.shape[0]:
+                        stylized = cv2.resize(stylized, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_LINEAR)
+                    return stylized, True
+                if task_status in {"failed", "stopped"}:
+                    raise RuntimeError(f"Easy Diffusion task ended with status: {task_status}")
                 time.sleep(0.5)
             raise TimeoutError("Timed out waiting for Easy Diffusion to complete the stylization task")
         except Exception as exc:
