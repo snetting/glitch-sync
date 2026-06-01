@@ -206,10 +206,12 @@ def frame_to_base64_png(frame):
     ok, buffer = cv2.imencode(".png", frame)
     if not ok:
         raise ValueError("Could not encode frame for AI stylization")
-    return base64.b64encode(buffer.tobytes()).decode("ascii")
+    return "data:image/png;base64," + base64.b64encode(buffer.tobytes()).decode("ascii")
 
 
 def base64_png_to_frame(image_b64, target_size):
+    if image_b64.startswith("data:image"):
+        image_b64 = image_b64.split(",", 1)[1]
     raw = base64.b64decode(image_b64)
     image = Image.open(io.BytesIO(raw)).convert("RGB")
     frame = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
