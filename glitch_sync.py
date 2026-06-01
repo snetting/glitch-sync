@@ -14,6 +14,7 @@ import json
 import pickle
 import hashlib
 import bisect
+from collections import deque
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
 from tkinter import filedialog, messagebox, ttk
@@ -82,6 +83,52 @@ ANALYSIS_CACHE_VERSION = "4"
 ANALYSIS_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "glitchsync", "analysis")
 STATIC_MOTION_THRESHOLD = 0.018
 LAB_EPSILON = 1e-6
+
+
+class ToolTip:
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tipwindow = None
+        self._after_id = None
+        widget.bind("<Enter>", self._schedule_show, add="+")
+        widget.bind("<Leave>", self.hide, add="+")
+        widget.bind("<ButtonPress>", self.hide, add="+")
+
+    def _schedule_show(self, _event=None):
+        if self._after_id is None:
+            self._after_id = self.widget.after(450, self.show)
+
+    def show(self, _event=None):
+        self.hide()
+        if not self.text:
+            return
+        x = self.widget.winfo_rootx() + 16
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
+        self.tipwindow = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        label = ttk.Label(
+            tw,
+            text=self.text,
+            justify=tk.LEFT,
+            relief=tk.SOLID,
+            borderwidth=1,
+            padding=(8, 5),
+            wraplength=320,
+        )
+        label.pack()
+
+    def hide(self, _event=None):
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+        if self.tipwindow is not None:
+            self.tipwindow.destroy()
+            self.tipwindow = None
 
 
 def file_cache_key(path, kind):
@@ -365,6 +412,18 @@ def output_path_for_mode(output, export_mode):
     return f"{root or output}_shotcut.zip"
 
 
+def increment_path_if_exists(path):
+    if not os.path.exists(path):
+        return path
+    root, ext = os.path.splitext(path)
+    index = 1
+    while True:
+        candidate = f"{root}_{index}{ext}"
+        if not os.path.exists(candidate):
+            return candidate
+        index += 1
+
+
 def prettify_xml(element):
     rough = ET.tostring(element, encoding="utf-8")
     return minidom.parseString(rough).toprettyxml(indent="  ", encoding="utf-8")
@@ -563,13 +622,15 @@ def apply_monochrome(frame, intensity, sensitivity=1.0, amount=1.0):
     return cv2.addWeighted(frame, 1 - blend, gray_bgr, blend, 0)
 
 def apply_hue_shift(frame, intensity, sensitivity=1.0, amount=1.0):
-    if intensity < 0.25:
+    if intensity < 0.15:
         return frame
-    shift = int(np.clip((intensity - 0.25) * sensitivity * amount * 70, -90, 90))
+    shift = int(np.clip((intensity - 0.15) * sensitivity * amount * 140, -180, 180))
     if abs(shift) < 1:
         return frame
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     hsv[:, :, 0] = ((hsv[:, :, 0].astype(np.int16) + shift) % 180).astype(np.uint8)
+    saturation_boost = np.clip(1.0 + (0.25 * np.clip(amount, 0, 2) * np.clip(sensitivity, 0, 3)), 1.0, 1.7)
+    hsv[:, :, 1] = np.clip(hsv[:, :, 1].astype(np.float32) * saturation_boost, 0, 255).astype(np.uint8)
     return cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
 
 def apply_vignette(frame, intensity, sensitivity=1.0, amount=1.0):
@@ -645,6 +706,7 @@ class GlitchProcessor:
         self.progress_callback, self.log_callback, self.frame_callback = progress_callback, log_callback, frame_callback
         self.stop_requested = False
         self.current_vid_idx = 0
+        self.recent_matches = {idx: deque(maxlen=8) for idx in range(len(self.inputs))}
 
     def log(self, msg):
         if self.log_callback: self.log_callback(msg)
@@ -718,7 +780,8 @@ class GlitchProcessor:
                          target_motion=None, frame_count=1, motion_scale=1.0):
         if not candidates:
             return None
-        use_variety = bool(source_use_counts) and self.source_variety > 0
+        diversity_strength = self.source_variety if self.source_variety > 0 else (0.35 if len(self.inputs) == 1 else 0.0)
+        use_variety = bool(source_use_counts) and diversity_strength > 0
         use_motion = (
             motion_db is not None
             and target_motion is not None
@@ -731,8 +794,19 @@ class GlitchProcessor:
         weights = []
         for v_idx, f_idx in candidates:
             weight = 1.0
+            history = self.recent_matches.get(v_idx)
+            if history:
+                nearest = min(abs(f_idx - prev) for prev in history)
+                repeat_scale = max(1.0, frame_count * 12.0)
+                repeat_separation = np.clip(nearest / repeat_scale, 0, 1)
+                weight *= 0.2 + (0.8 * (repeat_separation ** 1.4))
             if use_variety:
                 weight *= ((max_count + 1) / (source_use_counts[v_idx] + 1)) ** (1 + (self.source_variety * 4))
+                if history:
+                    nearest = min(abs(f_idx - prev) for prev in history)
+                    spread = max(1.0, frame_count * (8.0 + (diversity_strength * 24.0)))
+                    separation = np.clip(nearest / spread, 0, 1)
+                    weight *= 0.25 + (0.75 * (separation ** (0.7 + (diversity_strength * 1.5))))
             if use_motion:
                 motion = self.segment_motion_score(motion_db, v_idx, f_idx, frame_count)
                 motion_norm = np.clip(motion / motion_scale, 0, 1)
@@ -922,7 +996,8 @@ class GlitchProcessor:
         }
 
     def find_best_match(self, target_b, frame_db, current_vid_idx, source_use_counts=None,
-                        motion_db=None, target_motion=None, frame_count=1, motion_scale=1.0):
+                        motion_db=None, target_motion=None, frame_count=1, motion_scale=1.0,
+                        source_streak=0):
         search_range = 8
         candidates_current, candidates_other, candidates_primary = [], [], []
         for b in range(max(0, target_b - search_range), min(255, target_b + search_range) + 1):
@@ -933,6 +1008,19 @@ class GlitchProcessor:
                 else: candidates_other.append((v_idx, f_idx))
         if candidates_primary and random.random() < self.primary_focus:
             return self.choose_candidate(candidates_primary, source_use_counts, motion_db, target_motion, frame_count, motion_scale)
+        if source_streak >= 5 and candidates_other:
+            self.log(
+                f"  Source lock detected after {source_streak} same-source segments; "
+                f"forcing an alternate source near brightness {target_b} "
+                f"({len(candidates_current)} current / {len(candidates_other)} alternate candidates)."
+            )
+            return self.choose_candidate(candidates_other, source_use_counts, motion_db, target_motion, frame_count, motion_scale)
+        if source_streak >= 5 and candidates_current and not candidates_other:
+            self.log(
+                f"  Source lock detected after {source_streak} same-source segments; "
+                f"no alternate candidates exist near brightness {target_b} "
+                f"({len(candidates_current)} current / 0 alternate candidates)."
+            )
         if candidates_current and (random.random() < self.coherence or not candidates_other):
             return self.choose_candidate(candidates_current, source_use_counts, motion_db, target_motion, frame_count, motion_scale)
         if candidates_other:
@@ -965,6 +1053,11 @@ class GlitchProcessor:
             nearest_pos = min(range(len(frames)), key=lambda idx: abs(frames[idx] - start_frame))
             return scores[nearest_pos]
         return float(np.mean(window))
+
+    def record_match(self, video_idx, start_frame):
+        history = self.recent_matches.get(video_idx)
+        if history is not None:
+            history.append(start_frame)
 
     def load_lut(self):
         if not self.lut_path:
@@ -1041,6 +1134,7 @@ class GlitchProcessor:
         motion_scale = self.motion_scale(motion_db)
         segments = []
         rendered_frames = 0
+        source_streak = 0
         if self.export_mode == EXPORT_CLIP_MLT:
             package_dir = tempfile.mkdtemp(prefix="glitchsync_shotcut_")
             clip_dir = os.path.join(package_dir, "media", "clips")
@@ -1080,9 +1174,13 @@ class GlitchProcessor:
                 target_motion,
                 num_frames,
                 motion_scale,
+                source_streak,
             )
             if match:
+                previous_vid_idx = self.current_vid_idx
                 self.current_vid_idx, start_frame = match
+                source_streak = source_streak + 1 if self.current_vid_idx == previous_vid_idx else 1
+                self.record_match(self.current_vid_idx, start_frame)
                 source_use_counts[self.current_vid_idx] += 1
                 caps[self.current_vid_idx].set(cv2.CAP_PROP_POS_FRAMES, start_frame)
                 chunk = []
@@ -1301,6 +1399,7 @@ class GlitchGUI:
         self.export_mode_label = tk.StringVar(value="Final video (MP4)")
         self.output_resolution_label = tk.StringVar(value="Auto (first input)")
         self.export_quality_label = tk.StringVar(value="High quality (slower)")
+        self.increment_output_if_exists = tk.BooleanVar(value=False)
         self.duration, self.fps, self.coherence, self.sensitivity = tk.DoubleVar(value=0.10), tk.IntVar(value=30), tk.DoubleVar(value=0.20), tk.DoubleVar(value=1.0)
         self.source_variety = tk.DoubleVar(value=0.0)
         self.source_variety_label = None
@@ -1335,6 +1434,8 @@ class GlitchGUI:
         self.style_choice = tk.StringVar()
         self.style_combo = None
         self.styles = self.load_styles_file()
+        self.tooltips = []
+        self.last_render_output_path = None
         self.last_progress_val = 0
         self.active_processor = None
         self.render_was_stopped = False
@@ -1416,31 +1517,33 @@ class GlitchGUI:
         ttk.Combobox(io, textvariable=self.output_resolution_label, values=list(OUTPUT_RESOLUTION_LABELS.keys()), state="readonly").grid(row=4, column=1, sticky="ew")
         ttk.Label(io, text="Out:").grid(row=5, column=0)
         ttk.Entry(io, textvariable=self.output).grid(row=5, column=1, sticky="ew")
-        ttk.Label(io, text="Render length:").grid(row=6, column=0, sticky="w")
-        render_length_controls = ttk.Frame(io); render_length_controls.grid(row=6, column=1, sticky="w", pady=5)
+        output_name_mode = ttk.Checkbutton(io, text="Increment if exists", variable=self.increment_output_if_exists)
+        output_name_mode.grid(row=6, column=1, sticky="w")
+        ttk.Label(io, text="Render length:").grid(row=7, column=0, sticky="w")
+        render_length_controls = ttk.Frame(io); render_length_controls.grid(row=7, column=1, sticky="w", pady=5)
         ttk.Combobox(render_length_controls, textvariable=self.render_mode, values=["Full", "Snippet"], state="readonly", width=10).pack(side=tk.LEFT)
         ttk.Spinbox(render_length_controls, from_=1, to=3600, textvariable=self.snippet_duration, width=7).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Label(render_length_controls, text="sec").pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Checkbutton(io, text="Primary focus", variable=self.primary_enabled).grid(row=7, column=0, sticky="w")
-        primary_controls = ttk.Frame(io); primary_controls.grid(row=7, column=1, sticky="w", pady=5)
+        ttk.Checkbutton(io, text="Primary focus", variable=self.primary_enabled).grid(row=8, column=0, sticky="w")
+        primary_controls = ttk.Frame(io); primary_controls.grid(row=8, column=1, sticky="w", pady=5)
         ttk.Button(primary_controls, text="Set Selected", command=self.set_primary_video).pack(side=tk.LEFT)
         ttk.Label(primary_controls, textvariable=self.primary_video_label).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Label(io, text="Focus:").grid(row=8, column=0, sticky="w")
-        primary_focus_controls = ttk.Frame(io); primary_focus_controls.grid(row=8, column=1, sticky="ew")
+        ttk.Label(io, text="Focus:").grid(row=9, column=0, sticky="w")
+        primary_focus_controls = ttk.Frame(io); primary_focus_controls.grid(row=9, column=1, sticky="ew")
         primary_focus_controls.columnconfigure(0, weight=1)
         ttk.Scale(primary_focus_controls, from_=0.0, to=1.0, variable=self.primary_focus, command=lambda e: self.update_primary_focus_label()).grid(row=0, column=0, sticky="ew")
         self.primary_focus_label = ttk.Label(primary_focus_controls, text="0.75", width=5); self.primary_focus_label.grid(row=0, column=1, sticky="w", padx=(8, 0))
-        ttk.Checkbutton(io, text="Color match", variable=self.color_match_enabled).grid(row=9, column=0, sticky="w")
-        color_ref_controls = ttk.Frame(io); color_ref_controls.grid(row=9, column=1, sticky="w", pady=5)
+        ttk.Checkbutton(io, text="Color match", variable=self.color_match_enabled).grid(row=10, column=0, sticky="w")
+        color_ref_controls = ttk.Frame(io); color_ref_controls.grid(row=10, column=1, sticky="w", pady=5)
         ttk.Button(color_ref_controls, text="Set Selected", command=self.set_color_reference_video).pack(side=tk.LEFT)
         ttk.Label(color_ref_controls, textvariable=self.color_reference_label).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Label(io, text="Ref match:").grid(row=10, column=0, sticky="w")
-        color_match_controls = ttk.Frame(io); color_match_controls.grid(row=10, column=1, sticky="ew")
+        ttk.Label(io, text="Ref match:").grid(row=11, column=0, sticky="w")
+        color_match_controls = ttk.Frame(io); color_match_controls.grid(row=11, column=1, sticky="ew")
         color_match_controls.columnconfigure(0, weight=1)
         ttk.Scale(color_match_controls, from_=0.0, to=1.0, variable=self.color_match_strength, command=lambda e: self.update_color_match_strength_label()).grid(row=0, column=0, sticky="ew")
         self.color_match_strength_label = ttk.Label(color_match_controls, text="0.50", width=5); self.color_match_strength_label.grid(row=0, column=1, sticky="w", padx=(8, 0))
-        ttk.Label(io, text="LUT:").grid(row=11, column=0, sticky="w")
-        lut_controls = ttk.Frame(io); lut_controls.grid(row=11, column=1, sticky="ew", pady=5)
+        ttk.Label(io, text="LUT:").grid(row=12, column=0, sticky="w")
+        lut_controls = ttk.Frame(io); lut_controls.grid(row=12, column=1, sticky="ew", pady=5)
         lut_controls.columnconfigure(0, weight=1)
         ttk.Entry(lut_controls, textvariable=self.lut_path).grid(row=0, column=0, sticky="ew")
         ttk.Button(lut_controls, text="...", command=self.pick_lut, width=3).grid(row=0, column=1, padx=(5, 0))
@@ -1453,39 +1556,82 @@ class GlitchGUI:
 
         set_f = ttk.LabelFrame(m, text="Parameters", padding="10"); set_f.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         set_f.columnconfigure(1, weight=1)
-        ttk.Checkbutton(set_f, text="Beat Sync", variable=self.beat_sync).grid(row=0, column=0, sticky="w")
-        ttk.Label(set_f, text="Beat interval:").grid(row=1, column=0)
-        ttk.Spinbox(set_f, from_=1, to=64, textvariable=self.beat_step, width=5).grid(row=1, column=1, sticky="w")
+        beat_sync_cb = ttk.Checkbutton(set_f, text="Beat Sync", variable=self.beat_sync)
+        beat_sync_cb.grid(row=0, column=0, sticky="w")
+        beat_interval_label = ttk.Label(set_f, text="Beat interval:")
+        beat_interval_label.grid(row=1, column=0)
+        beat_interval_spin = ttk.Spinbox(set_f, from_=1, to=64, textvariable=self.beat_step, width=5)
+        beat_interval_spin.grid(row=1, column=1, sticky="w")
         ttk.Label(set_f, text="beats").grid(row=1, column=2, sticky="w")
-        ttk.Label(set_f, text="Beat variation:").grid(row=2, column=0)
-        ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.beat_variation, command=lambda e: self.update_beat_variation_label()).grid(row=2, column=1, sticky="ew")
+        beat_variation_label = ttk.Label(set_f, text="Beat variation:")
+        beat_variation_label.grid(row=2, column=0)
+        beat_variation_scale = ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.beat_variation, command=lambda e: self.update_beat_variation_label())
+        beat_variation_scale.grid(row=2, column=1, sticky="ew")
         self.beat_variation_label = ttk.Label(set_f, text="0.00"); self.beat_variation_label.grid(row=2, column=2)
-        ttk.Label(set_f, text="Duration (no Beat Sync):").grid(row=3, column=0)
-        ttk.Scale(set_f, from_=0.0, to=8.0, variable=self.duration, command=lambda e: self.l_dur.config(text=f"{self.duration.get():.2f}s")).grid(row=3, column=1, sticky="ew")
+        duration_label = ttk.Label(set_f, text="Duration (no Beat Sync):")
+        duration_label.grid(row=3, column=0)
+        duration_scale = ttk.Scale(set_f, from_=0.0, to=8.0, variable=self.duration, command=lambda e: self.l_dur.config(text=f"{self.duration.get():.2f}s"))
+        duration_scale.grid(row=3, column=1, sticky="ew")
         self.l_dur = ttk.Label(set_f, text="0.10s"); self.l_dur.grid(row=3, column=2)
-        ttk.Label(set_f, text="Coherence:").grid(row=4, column=0)
-        ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.coherence, command=lambda e: self.l_coh.config(text=f"{self.coherence.get():.2f}")).grid(row=4, column=1, sticky="ew")
+        coherence_label = ttk.Label(set_f, text="Coherence:")
+        coherence_label.grid(row=4, column=0)
+        coherence_scale = ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.coherence, command=lambda e: self.l_coh.config(text=f"{self.coherence.get():.2f}"))
+        coherence_scale.grid(row=4, column=1, sticky="ew")
         self.l_coh = ttk.Label(set_f, text="0.20"); self.l_coh.grid(row=4, column=2)
-        ttk.Label(set_f, text="Source variety:").grid(row=5, column=0)
-        ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.source_variety, command=lambda e: self.update_source_variety_label()).grid(row=5, column=1, sticky="ew")
+        source_variety_label = ttk.Label(set_f, text="Source variety:")
+        source_variety_label.grid(row=5, column=0)
+        source_variety_scale = ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.source_variety, command=lambda e: self.update_source_variety_label())
+        source_variety_scale.grid(row=5, column=1, sticky="ew")
         self.source_variety_label = ttk.Label(set_f, text="0.00"); self.source_variety_label.grid(row=5, column=2)
-        ttk.Label(set_f, text="Music match:").grid(row=6, column=0)
-        ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.music_match, command=lambda e: self.update_music_match_label()).grid(row=6, column=1, sticky="ew")
+        music_match_label = ttk.Label(set_f, text="Music match:")
+        music_match_label.grid(row=6, column=0)
+        music_match_scale = ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.music_match, command=lambda e: self.update_music_match_label())
+        music_match_scale.grid(row=6, column=1, sticky="ew")
         self.music_match_label = ttk.Label(set_f, text="0.35"); self.music_match_label.grid(row=6, column=2)
-        ttk.Label(set_f, text="Sensitivity:").grid(row=7, column=0)
-        ttk.Scale(set_f, from_=0.1, to=3.0, variable=self.sensitivity, command=lambda e: self.l_sen.config(text=f"{self.sensitivity.get():.2f}")).grid(row=7, column=1, sticky="ew")
+        sensitivity_label = ttk.Label(set_f, text="Sensitivity:")
+        sensitivity_label.grid(row=7, column=0)
+        sensitivity_scale = ttk.Scale(set_f, from_=0.1, to=3.0, variable=self.sensitivity, command=lambda e: self.l_sen.config(text=f"{self.sensitivity.get():.2f}"))
+        sensitivity_scale.grid(row=7, column=1, sticky="ew")
         self.l_sen = ttk.Label(set_f, text="1.00"); self.l_sen.grid(row=7, column=2)
-        ttk.Label(set_f, text="FPS:").grid(row=8, column=0)
-        ttk.Spinbox(set_f, from_=1, to=120, textvariable=self.fps, width=5).grid(row=8, column=1, sticky="w")
-        ttk.Label(set_f, text="Style name:").grid(row=9, column=0)
-        ttk.Entry(set_f, textvariable=self.style_name).grid(row=9, column=1, sticky="ew")
+        fps_label = ttk.Label(set_f, text="FPS:")
+        fps_label.grid(row=8, column=0)
+        fps_spin = ttk.Spinbox(set_f, from_=1, to=120, textvariable=self.fps, width=5)
+        fps_spin.grid(row=8, column=1, sticky="w")
+        style_name_label = ttk.Label(set_f, text="Style name:")
+        style_name_label.grid(row=9, column=0)
+        style_name_entry = ttk.Entry(set_f, textvariable=self.style_name)
+        style_name_entry.grid(row=9, column=1, sticky="ew")
         ttk.Button(set_f, text="Save Style", command=self.save_named_style).grid(row=9, column=2, sticky="ew")
-        ttk.Label(set_f, text="Load style:").grid(row=10, column=0)
+        load_style_label = ttk.Label(set_f, text="Load style:")
+        load_style_label.grid(row=10, column=0)
         self.style_combo = ttk.Combobox(set_f, textvariable=self.style_choice, state="readonly")
         self.style_combo.grid(row=10, column=1, sticky="ew")
         ttk.Button(set_f, text="Load Style", command=self.load_named_style).grid(row=10, column=2, sticky="ew")
         ttk.Button(set_f, text="Auto Style", command=self.auto_style).grid(row=11, column=1, sticky="ew")
         ttk.Button(set_f, text="Delete Style", command=self.delete_named_style).grid(row=11, column=2, sticky="ew")
+
+        self.add_tooltip(beat_sync_cb, "Enable beat detection so clip boundaries follow the music.")
+        self.add_tooltip(output_name_mode, "When enabled, existing output files are preserved and a numeric suffix is added.")
+        self.add_tooltip(beat_interval_label, "Cut on every Nth detected beat. Higher values make cuts less frequent.")
+        self.add_tooltip(beat_interval_spin, "Number of beats between cuts when Beat Sync is enabled.")
+        self.add_tooltip(beat_variation_label, "Randomly add extra beat cuts for less predictable pacing.")
+        self.add_tooltip(beat_variation_scale, "How often to insert extra cuts on skipped beats.")
+        self.add_tooltip(duration_label, "Fallback segment duration when Beat Sync is off.")
+        self.add_tooltip(duration_scale, "How long each segment lasts when Beat Sync is disabled.")
+        self.add_tooltip(coherence_label, "Prefer staying on the current source video instead of switching often.")
+        self.add_tooltip(coherence_scale, "Higher values keep the same source video more often.")
+        self.add_tooltip(source_variety_label, "Prefer sources that have been used less often.")
+        self.add_tooltip(source_variety_scale, "Higher values spread selections across sources more aggressively.")
+        self.add_tooltip(music_match_label, "Bias frame selection toward source motion that matches the audio energy.")
+        self.add_tooltip(music_match_scale, "Higher values make audio energy influence source choice more strongly.")
+        self.add_tooltip(sensitivity_label, "Amplify or soften all enabled video effects.")
+        self.add_tooltip(sensitivity_scale, "Higher values make enabled effects stronger and easier to trigger.")
+        self.add_tooltip(fps_label, "Frames per second for the exported video.")
+        self.add_tooltip(fps_spin, "Lower values render faster; higher values give smoother motion.")
+        self.add_tooltip(style_name_label, "Name for saving the current settings as a reusable style.")
+        self.add_tooltip(style_name_entry, "Enter a name before saving a custom style.")
+        self.add_tooltip(load_style_label, "Choose a saved style to restore a preset configuration.")
+        self.add_tooltip(self.style_combo, "Select a built-in or saved style.")
 
         fx = ttk.LabelFrame(m, text="Effects", padding="10"); fx.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
         fx.columnconfigure(1, weight=1)
@@ -1515,12 +1661,18 @@ class GlitchGUI:
         self.root.after(0, self._log_msg_ui, msg)
     def _log_msg_ui(self, msg):
         self.log_t.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n"); self.log_t.see(tk.END)
+    def add_tooltip(self, widget, text):
+        self.tooltips.append(ToolTip(widget, text))
     def add_effect_control(self, parent, row, label, enabled_var, amount_name, max_value=2.0):
-        ttk.Checkbutton(parent, text=label, variable=enabled_var).grid(row=row, column=0, sticky="w")
-        ttk.Scale(parent, from_=0.0, to=max_value, variable=self.effect_amounts[amount_name], command=lambda e, name=amount_name: self.update_effect_amount_label(name)).grid(row=row, column=1, sticky="ew", padx=5)
+        check = ttk.Checkbutton(parent, text=label, variable=enabled_var)
+        check.grid(row=row, column=0, sticky="w")
+        scale = ttk.Scale(parent, from_=0.0, to=max_value, variable=self.effect_amounts[amount_name], command=lambda e, name=amount_name: self.update_effect_amount_label(name))
+        scale.grid(row=row, column=1, sticky="ew", padx=5)
         self.effect_amount_labels[amount_name] = ttk.Label(parent, text=f"{self.effect_amounts[amount_name].get():.2f}", width=5)
         self.effect_amount_labels[amount_name].grid(row=row, column=2, sticky="e")
-        ttk.Combobox(parent, textvariable=self.effect_timing[amount_name], values=EFFECT_TIMING_LABELS, state="readonly", width=6).grid(row=row, column=3, sticky="w", padx=(8, 0))
+        timing = ttk.Combobox(parent, textvariable=self.effect_timing[amount_name], values=EFFECT_TIMING_LABELS, state="readonly", width=6)
+        timing.grid(row=row, column=3, sticky="w", padx=(8, 0))
+        return check, scale, timing
     def update_effect_amount_label(self, amount_name):
         self.effect_amount_labels[amount_name].config(text=f"{self.effect_amounts[amount_name].get():.2f}")
     def update_primary_focus_label(self):
@@ -1579,6 +1731,7 @@ class GlitchGUI:
             "export_mode_label": self.export_mode_label.get(),
             "output_resolution_label": self.output_resolution_label.get(),
             "export_quality_label": self.export_quality_label.get(),
+            "increment_output_if_exists": self.increment_output_if_exists.get(),
             "duration": self.duration.get(),
             "fps": self.fps.get(),
             "render_mode": self.render_mode.get(),
@@ -1745,6 +1898,7 @@ class GlitchGUI:
             if settings.get("export_quality_label") in EXPORT_QUALITY_LABELS
             else "High quality (slower)"
         )
+        self.increment_output_if_exists.set(settings.get("increment_output_if_exists", self.increment_output_if_exists.get()))
         self.duration.set(settings.get("duration", self.duration.get()))
         self.fps.set(settings.get("fps", self.fps.get()))
         if settings.get("render_mode") in ("Full", "Snippet"):
@@ -1944,6 +2098,12 @@ class GlitchGUI:
             self.lut_path.set(path)
     def clear_lut(self):
         self.lut_path.set("")
+    def resolve_render_output(self, export_mode):
+        base_output = self.output.get()
+        resolved_output = output_path_for_mode(base_output, export_mode)
+        if self.increment_output_if_exists.get():
+            resolved_output = increment_path_if_exists(resolved_output)
+        return resolved_output
     def update_p(self, curr, total):
         self.root.after(0, self._update_p_ui, curr, total)
     def _update_p_ui(self, curr, total):
@@ -1957,6 +2117,7 @@ class GlitchGUI:
         if not self.inputs or not self.audio.get(): return messagebox.showerror("Error", "Missing files")
         self.save_last_settings()
         self.render_was_stopped = False
+        self.last_render_output_path = None
         self.btn.config(state=tk.DISABLED); self.stop_btn.config(state=tk.NORMAL); self.rv_btn.config(state=tk.DISABLED); self.last_progress_val = 0
         threading.Thread(target=self.run_e, daemon=True).start()
     def stop_render(self):
@@ -1968,6 +2129,10 @@ class GlitchGUI:
     def run_e(self):
         try:
             export_mode = EXPORT_MODE_LABELS[self.export_mode_label.get()]
+            resolved_output = self.resolve_render_output(export_mode)
+            self.last_render_output_path = resolved_output
+            if resolved_output != self.output.get():
+                self.log_msg(f"Output resolved to: {resolved_output}")
             effect_amounts = {name: var.get() for name, var in self.effect_amounts.items()}
             effect_timing = {name: var.get() for name, var in self.effect_timing.items()}
             primary_idx = self.primary_video_idx if self.primary_enabled.get() and self.inputs else None
@@ -1976,7 +2141,7 @@ class GlitchGUI:
             color_match_strength = self.color_match_strength.get() if self.color_match_enabled.get() else 0.0
             render_limit = self.snippet_duration.get() if self.render_mode.get() == "Snippet" else None
             output_resolution = OUTPUT_RESOLUTION_LABELS.get(self.output_resolution_label.get())
-            p = GlitchProcessor(self.inputs, self.audio.get(), self.output.get(), self.duration.get(), self.fps.get(), self.pixelate.get(), self.flash.get(), self.rewind.get(), self.rgb_shift.get(), self.shake.get(), self.ghosting.get(), self.static_pan_zoom.get(), self.monochrome.get(), self.hue_shift.get(), self.vignette.get(), self.beat_sync.get(), self.coherence.get(), self.sensitivity.get(), export_mode, self.update_p, self.log_msg, self.display_frame, effect_amounts, primary_idx, primary_focus, self.beat_step.get(), self.beat_variation.get(), render_limit, self.source_variety.get(), self.music_match.get(), color_reference_idx, color_match_strength, self.lut_path.get().strip(), output_resolution, self.export_quality_label.get(), effect_timing)
+            p = GlitchProcessor(self.inputs, self.audio.get(), resolved_output, self.duration.get(), self.fps.get(), self.pixelate.get(), self.flash.get(), self.rewind.get(), self.rgb_shift.get(), self.shake.get(), self.ghosting.get(), self.static_pan_zoom.get(), self.monochrome.get(), self.hue_shift.get(), self.vignette.get(), self.beat_sync.get(), self.coherence.get(), self.sensitivity.get(), export_mode, self.update_p, self.log_msg, self.display_frame, effect_amounts, primary_idx, primary_focus, self.beat_step.get(), self.beat_variation.get(), render_limit, self.source_variety.get(), self.music_match.get(), color_reference_idx, color_match_strength, self.lut_path.get().strip(), output_resolution, self.export_quality_label.get(), effect_timing)
             self.active_processor = p
             if self.render_was_stopped:
                 p.stop_requested = True
@@ -2010,8 +2175,9 @@ class GlitchGUI:
         self.cv.delete("all")
         self.cv.create_image(240, 135, anchor=tk.CENTER, image=img_tk); self.cv._img_ref = img_tk
     def review_render(self):
-        self.log_msg(f"Launching ffplay: {self.output.get()}")
-        subprocess.Popen(['ffplay', '-i', self.output.get()], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        path = self.last_render_output_path or self.resolve_render_output(EXPORT_MODE_LABELS[self.export_mode_label.get()])
+        self.log_msg(f"Launching ffplay: {path}")
+        subprocess.Popen(['ffplay', '-i', path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
