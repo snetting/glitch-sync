@@ -820,6 +820,22 @@ class GlitchProcessor:
             self.ai_backend_model_warning_shown = True
         return AI_DEFAULT_MODEL_FALLBACK, vae_model
 
+    @staticmethod
+    def ai_parse_stream_response(stream_text):
+        decoder = json.JSONDecoder()
+        documents = []
+        index = 0
+        text_length = len(stream_text)
+        while index < text_length:
+            while index < text_length and stream_text[index].isspace():
+                index += 1
+            if index >= text_length:
+                break
+            document, end_index = decoder.raw_decode(stream_text, index)
+            documents.append(document)
+            index = end_index
+        return documents
+
     def ai_target_size(self, frame):
         height, width = frame.shape[:2]
         if max(width, height) <= self.ai_max_dim:
@@ -886,11 +902,19 @@ class GlitchProcessor:
                 if task_status != last_status:
                     self.log(f"  Easy Diffusion task {task_id} status: {task_status or ping_data.get('status')}")
                     last_status = task_status
-                if task_status == "completed":
-                    stream_response: Response = self.ai_session.get(stream_url, timeout=(10, 30))
+                if task_status in {"buffer", "completed"}:
+                    stream_response: Response = self.ai_session.get(stream_url, timeout=(10, 600))
                     stream_response.raise_for_status()
-                    data = stream_response.json()
-                    images = data.get("output") or []
+                    documents = self.ai_parse_stream_response(stream_response.text)
+                    final_document = next(
+                        (document for document in reversed(documents) if isinstance(document, dict) and document.get("output")),
+                        documents[-1] if documents else {},
+                    )
+                    if final_document.get("status") not in {"succeeded", "success", "completed"}:
+                        raise RuntimeError(
+                            f"Easy Diffusion stream ended without a successful result: {final_document.get('status')}"
+                        )
+                    images = final_document.get("output") or []
                     if not images:
                         raise RuntimeError("Easy Diffusion completed without returning an image")
                     output_image = images[0]
