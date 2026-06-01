@@ -702,7 +702,7 @@ class GlitchProcessor:
                  color_reference_idx=None, color_match_strength=0.0,
                  lut_path="", output_resolution=None, export_quality_label="High quality (slower)",
                  effect_timing=None,
-                 ai_enabled=False, ai_backend_url=AI_DEFAULT_BACKEND_URL,
+                 ai_enabled=False, ai_segment_anchor_only=True, ai_backend_url=AI_DEFAULT_BACKEND_URL,
                  ai_prompt=AI_DEFAULT_PROMPT, ai_negative_prompt=AI_DEFAULT_NEGATIVE_PROMPT,
                  ai_every_n_frames=AI_DEFAULT_EVERY_N_FRAMES, ai_denoise=AI_DEFAULT_DENOISE,
                  ai_cfg_scale=AI_DEFAULT_CFG_SCALE, ai_steps=AI_DEFAULT_STEPS,
@@ -727,6 +727,7 @@ class GlitchProcessor:
         self.output_resolution = output_resolution
         self.export_quality_label = export_quality_label
         self.ai_enabled = bool(ai_enabled)
+        self.ai_segment_anchor_only = bool(ai_segment_anchor_only)
         self.ai_backend_url = ai_backend_url.strip()
         self.ai_prompt = ai_prompt.strip()
         self.ai_negative_prompt = ai_negative_prompt.strip()
@@ -738,8 +739,6 @@ class GlitchProcessor:
         self.ai_blend = float(np.clip(ai_blend, 0.0, 1.0))
         self.ai_session = requests.Session()
         self.ai_backend_warning_shown = False
-        self.ai_last_style_frame = None
-        self.ai_last_style_anchor = -10**9
         self.effect_amounts = DEFAULT_EFFECT_AMOUNTS.copy()
         if effect_amounts:
             for name in EFFECT_NAMES:
@@ -1382,9 +1381,16 @@ class GlitchProcessor:
                         f = apply_monochrome(f, monochrome_mids, self.sensitivity, monochrome_amount)
                     if self.hue_shift and hue_shift_amount > 0:
                         f = apply_hue_shift(f, hue_shift_highs, self.sensitivity, hue_shift_amount)
-                    if self.vignette and vignette_amount > 0:
-                        f = apply_vignette(f, vignette_bass, self.sensitivity, vignette_amount)
-                    if self.ai_stylization_active():
+                if self.vignette and vignette_amount > 0:
+                    f = apply_vignette(f, vignette_bass, self.sensitivity, vignette_amount)
+                if self.ai_stylization_active():
+                    if self.ai_segment_anchor_only:
+                        if ai_anchor is None:
+                            ai_anchor = self.ai_stylize_frame(f)
+                            self.log(f"  AI anchor generated for segment {i + 1}/{len(cut_times)}")
+                        if ai_anchor is not None and self.ai_blend > 0:
+                            f = cv2.addWeighted(f, 1 - self.ai_blend, ai_anchor, self.ai_blend, 0)
+                    else:
                         should_refresh_ai = (
                             ai_anchor is None
                             or frame_idx == 0
@@ -1522,6 +1528,7 @@ class GlitchGUI:
         self.increment_output_if_exists = tk.BooleanVar(value=False)
         self.ai_panel_visible = tk.BooleanVar(value=False)
         self.ai_enabled = tk.BooleanVar(value=False)
+        self.ai_segment_anchor_only = tk.BooleanVar(value=True)
         self.ai_backend_url = tk.StringVar(value=AI_DEFAULT_BACKEND_URL)
         self.ai_prompt = tk.StringVar(value=AI_DEFAULT_PROMPT)
         self.ai_negative_prompt = tk.StringVar(value=AI_DEFAULT_NEGATIVE_PROMPT)
@@ -1774,6 +1781,8 @@ class GlitchGUI:
         ttk.Label(self.ai_frame, text="Blend strength:").grid(row=9, column=0, sticky="w")
         ai_blend_scale = ttk.Scale(self.ai_frame, from_=0.0, to=1.0, variable=self.ai_blend)
         ai_blend_scale.grid(row=9, column=1, sticky="ew")
+        ai_segment_anchor = ttk.Checkbutton(self.ai_frame, text="Segment anchor only", variable=self.ai_segment_anchor_only)
+        ai_segment_anchor.grid(row=10, column=0, sticky="w")
 
         self.add_tooltip(ai_toggle, "Show or hide the experimental AI stylization controls.")
         self.add_tooltip(ai_backend_entry, "Base URL for a local A1111/Easy Diffusion WebUI-compatible img2img API.")
@@ -1785,6 +1794,7 @@ class GlitchGUI:
         self.add_tooltip(ai_steps_spin, "Inference steps per stylized anchor frame.")
         self.add_tooltip(ai_max_dim_spin, "Downscale the AI input to cap VRAM usage and latency.")
         self.add_tooltip(ai_blend_scale, "How strongly the stylized anchor influences the final video frame.")
+        self.add_tooltip(ai_segment_anchor, "When enabled, only one stylized anchor is generated per source segment.")
         if not self.ai_panel_visible.get():
             self.ai_frame.grid_remove()
 
@@ -1917,6 +1927,7 @@ class GlitchGUI:
             "increment_output_if_exists": self.increment_output_if_exists.get(),
             "ai_panel_visible": self.ai_panel_visible.get(),
             "ai_enabled": self.ai_enabled.get(),
+            "ai_segment_anchor_only": self.ai_segment_anchor_only.get(),
             "ai_backend_url": self.ai_backend_url.get(),
             "ai_prompt": self.ai_prompt.get(),
             "ai_negative_prompt": self.ai_negative_prompt.get(),
@@ -2095,6 +2106,7 @@ class GlitchGUI:
         self.increment_output_if_exists.set(settings.get("increment_output_if_exists", self.increment_output_if_exists.get()))
         self.ai_panel_visible.set(settings.get("ai_panel_visible", self.ai_panel_visible.get()))
         self.ai_enabled.set(settings.get("ai_enabled", self.ai_enabled.get()))
+        self.ai_segment_anchor_only.set(settings.get("ai_segment_anchor_only", self.ai_segment_anchor_only.get()))
         self.ai_backend_url.set(settings.get("ai_backend_url", self.ai_backend_url.get()))
         self.ai_prompt.set(settings.get("ai_prompt", self.ai_prompt.get()))
         self.ai_negative_prompt.set(settings.get("ai_negative_prompt", self.ai_negative_prompt.get()))
@@ -2385,6 +2397,7 @@ class GlitchGUI:
                 self.export_quality_label.get(),
                 effect_timing,
                 self.ai_enabled.get(),
+                self.ai_segment_anchor_only.get(),
                 self.ai_backend_url.get(),
                 self.ai_prompt.get(),
                 self.ai_negative_prompt.get(),
