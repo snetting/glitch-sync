@@ -778,6 +778,7 @@ class GlitchProcessor:
                  experimental_mode=False,
                  ai_dream_chance=0.25,
                  ai_dream_timing="Clip",
+                 scene_transition_mode="Auto",
                  ai_enabled=False, ai_segment_anchor_only=True, ai_backend_url=AI_DEFAULT_BACKEND_URL,
                  ai_prompt=AI_DEFAULT_PROMPT, ai_negative_prompt=AI_DEFAULT_NEGATIVE_PROMPT,
                  ai_every_n_frames=AI_DEFAULT_EVERY_N_FRAMES, ai_denoise=AI_DEFAULT_DENOISE,
@@ -806,6 +807,7 @@ class GlitchProcessor:
         self.output_resolution = output_resolution
         self.export_quality_label = export_quality_label
         self.experimental_mode = bool(experimental_mode)
+        self.scene_transition_mode = scene_transition_mode if scene_transition_mode in SCENE_TRANSITION_LABELS else "Auto"
         self.ai_dream_chance = float(np.clip(ai_dream_chance, 0.0, 1.0))
         self.ai_dream_timing = ai_dream_timing if ai_dream_timing in AI_DREAM_TIMING_LABELS else "Clip"
         self.ai_enabled = bool(ai_enabled)
@@ -3123,6 +3125,7 @@ class GlitchGUI:
                 self.experimental_mode.get(),
                 self.ai_dream_chance.get(),
                 self.ai_dream_timing.get(),
+                self.scene_transition_mode.get(),
                 self.ai_enabled.get(),
                 self.ai_segment_anchor_only.get(),
                 self.ai_backend_url.get(),
