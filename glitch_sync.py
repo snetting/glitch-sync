@@ -14,6 +14,9 @@ import json
 import pickle
 import hashlib
 import bisect
+import base64
+import io
+import time
 from collections import deque
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
@@ -21,6 +24,8 @@ from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
 from datetime import datetime
 from PIL import Image, ImageTk
+import requests
+from requests import Response
 
 EXPORT_FINAL_VIDEO = "final_video"
 EXPORT_CUT_AWARE_MLT = "cut_aware_mlt"
@@ -83,6 +88,21 @@ ANALYSIS_CACHE_VERSION = "4"
 ANALYSIS_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "glitchsync", "analysis")
 STATIC_MOTION_THRESHOLD = 0.018
 LAB_EPSILON = 1e-6
+AI_DEFAULT_BACKEND_URL = "http://127.0.0.1:9000"
+AI_DEFAULT_PROMPT = "hand drawn illustration, expressive linework"
+AI_DEFAULT_NEGATIVE_PROMPT = "blurry, low quality, watermark, text"
+AI_DEFAULT_EVERY_N_FRAMES = 12
+AI_DEFAULT_DENOISE = 0.32
+AI_DEFAULT_CFG_SCALE = 6.5
+AI_DEFAULT_STEPS = 10
+AI_DEFAULT_MAX_DIM = 512
+AI_DEFAULT_BLEND = 0.35
+AI_DEFAULT_SESSION = "glitchsync"
+AI_DEFAULT_MODEL_FALLBACK = "sd-v1-4"
+AI_OBSOLETE_NEGATIVE_PROMPTS = {
+    "blurry, low quality, watermark, text, deformed, extra fingers",
+    "blurry, low quality, watermark, text, deformed",
+}
 
 
 class ToolTip:
@@ -184,6 +204,25 @@ def apply_cube_lut(frame, lut):
     graded = lut[idx[:, :, 0], idx[:, :, 1], idx[:, :, 2]]
     graded = np.clip(graded * 255.0, 0, 255).astype(np.uint8)
     return cv2.cvtColor(graded, cv2.COLOR_RGB2BGR)
+
+
+def frame_to_base64_png(frame):
+    ok, buffer = cv2.imencode(".png", frame)
+    if not ok:
+        raise ValueError("Could not encode frame for AI stylization")
+    return "data:image/png;base64," + base64.b64encode(buffer.tobytes()).decode("ascii")
+
+
+def base64_png_to_frame(image_b64, target_size):
+    if image_b64.startswith("data:image"):
+        image_b64 = image_b64.split(",", 1)[1]
+    raw = base64.b64decode(image_b64)
+    image = Image.open(io.BytesIO(raw)).convert("RGB")
+    frame = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    target_width, target_height = target_size
+    if frame.shape[1] != target_width or frame.shape[0] != target_height:
+        frame = cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
+    return frame
 
 
 def fit_frame_to_output(frame, width, height):
@@ -672,7 +711,13 @@ class GlitchProcessor:
                  source_variety=0.0, music_match=0.35,
                  color_reference_idx=None, color_match_strength=0.0,
                  lut_path="", output_resolution=None, export_quality_label="High quality (slower)",
-                 effect_timing=None):
+                 effect_timing=None,
+                 experimental_mode=False,
+                 ai_enabled=False, ai_segment_anchor_only=True, ai_backend_url=AI_DEFAULT_BACKEND_URL,
+                 ai_prompt=AI_DEFAULT_PROMPT, ai_negative_prompt=AI_DEFAULT_NEGATIVE_PROMPT,
+                 ai_every_n_frames=AI_DEFAULT_EVERY_N_FRAMES, ai_denoise=AI_DEFAULT_DENOISE,
+                 ai_cfg_scale=AI_DEFAULT_CFG_SCALE, ai_steps=AI_DEFAULT_STEPS,
+                 ai_max_dim=AI_DEFAULT_MAX_DIM, ai_blend=AI_DEFAULT_BLEND):
         self.inputs, self.audio, self.output = inputs, audio, output
         self.duration, self.fps = duration, fps
         self.pixelate, self.flash, self.rewind = pixelate, flash, rewind
@@ -692,6 +737,21 @@ class GlitchProcessor:
         self.lut = None
         self.output_resolution = output_resolution
         self.export_quality_label = export_quality_label
+        self.experimental_mode = bool(experimental_mode)
+        self.ai_enabled = bool(ai_enabled)
+        self.ai_segment_anchor_only = bool(ai_segment_anchor_only)
+        self.ai_backend_url = ai_backend_url.strip()
+        self.ai_prompt = ai_prompt.strip()
+        self.ai_negative_prompt = ai_negative_prompt.strip()
+        self.ai_every_n_frames = max(1, int(ai_every_n_frames))
+        self.ai_denoise = float(np.clip(ai_denoise, 0.05, 0.95))
+        self.ai_cfg_scale = float(np.clip(ai_cfg_scale, 1.0, 30.0))
+        self.ai_steps = max(1, int(ai_steps))
+        self.ai_max_dim = max(64, int(ai_max_dim))
+        self.ai_blend = float(np.clip(ai_blend, 0.0, 1.0))
+        self.ai_session = requests.Session()
+        self.ai_backend_warning_shown = False
+        self.ai_backend_model_warning_shown = False
         self.effect_amounts = DEFAULT_EFFECT_AMOUNTS.copy()
         if effect_amounts:
             for name in EFFECT_NAMES:
@@ -729,6 +789,158 @@ class GlitchProcessor:
             self.export_quality_label,
             EXPORT_QUALITY_LABELS["High quality (slower)"],
         )
+
+    def ai_stylization_active(self):
+        return self.experimental_mode and self.ai_enabled and bool(self.ai_backend_url) and bool(self.ai_prompt)
+
+    def ai_backend_base_url(self):
+        return self.ai_backend_url.rstrip("/")
+
+    def ai_backend_app_config(self):
+        response = self.ai_session.get(f"{self.ai_backend_base_url()}/get/app_config", timeout=(10, 30))
+        response.raise_for_status()
+        return response.json()
+
+    def ai_backend_model_selection(self):
+        config = self.ai_backend_app_config()
+        model_config = config.get("model") or {}
+        stable_diffusion_model = model_config.get("stable-diffusion")
+        vae_model = model_config.get("vae")
+
+        if stable_diffusion_model:
+            return stable_diffusion_model, vae_model
+
+        response = self.ai_session.get(f"{self.ai_backend_base_url()}/get/models", timeout=(10, 30))
+        response.raise_for_status()
+        models_data = response.json().get("models") or []
+        stable_diffusion_models = [
+            model_info.get("model")
+            for model_info in models_data
+            if "stable-diffusion" in (model_info.get("tags") or []) and model_info.get("model")
+        ]
+        if stable_diffusion_models:
+            return stable_diffusion_models[0], vae_model
+
+        if not self.ai_backend_model_warning_shown:
+            self.log("  Easy Diffusion did not report a configured stable-diffusion model; using a bundled default.")
+            self.ai_backend_model_warning_shown = True
+        return AI_DEFAULT_MODEL_FALLBACK, vae_model
+
+    @staticmethod
+    def ai_parse_stream_response(stream_text):
+        decoder = json.JSONDecoder()
+        documents = []
+        index = 0
+        text_length = len(stream_text)
+        while index < text_length:
+            while index < text_length and stream_text[index].isspace():
+                index += 1
+            if index >= text_length:
+                break
+            document, end_index = decoder.raw_decode(stream_text, index)
+            documents.append(document)
+            index = end_index
+        return documents
+
+    def ai_target_size(self, frame):
+        height, width = frame.shape[:2]
+        if max(width, height) <= self.ai_max_dim:
+            return width, height
+        if width >= height:
+            target_width = self.ai_max_dim
+            target_height = max(64, int(round(height * (self.ai_max_dim / max(width, 1)))))
+        else:
+            target_height = self.ai_max_dim
+            target_width = max(64, int(round(width * (self.ai_max_dim / max(height, 1)))))
+        return target_width, target_height
+
+    def ai_render_frame(self, frame):
+        if not self.ai_stylization_active():
+            return frame, False
+        try:
+            target_width, target_height = self.ai_target_size(frame)
+            resized = cv2.resize(frame, (target_width, target_height), interpolation=cv2.INTER_AREA)
+            stable_diffusion_model, vae_model = self.ai_backend_model_selection()
+            payload = {
+                "prompt": self.ai_prompt,
+                "negative_prompt": self.ai_negative_prompt,
+                "seed": -1,
+                "width": target_width,
+                "height": target_height,
+                "num_outputs": 1,
+                "num_inference_steps": self.ai_steps,
+                "guidance_scale": self.ai_cfg_scale,
+                "prompt_strength": self.ai_denoise,
+                "init_image": frame_to_base64_png(resized),
+                "mask": "",
+                "preserve_init_image_color_profile": False,
+                "sampler_name": "ddim",
+                "use_stable_diffusion_model": stable_diffusion_model,
+                "use_vae_model": vae_model,
+                "request_id": f"glitchsync_{random.randint(100000, 999999)}",
+                "session_id": AI_DEFAULT_SESSION,
+                "vram_usage_level": "balanced",
+                "output_format": "png",
+                "output_quality": 100,
+                "output_lossless": True,
+            }
+            self.log(f"  Easy Diffusion model: {stable_diffusion_model}")
+            response = self.ai_session.post(
+                f"{self.ai_backend_base_url()}/render",
+                json=payload,
+                timeout=(10, 30),
+            )
+            response.raise_for_status()
+            render_data = response.json()
+            task_id = render_data.get("task")
+            if not task_id:
+                raise RuntimeError("Easy Diffusion did not return a task id")
+            ping_url = f"{self.ai_backend_base_url()}/ping?session_id={AI_DEFAULT_SESSION}"
+            stream_url = f"{self.ai_backend_base_url()}/image/stream/{task_id}"
+            deadline = time.time() + 180
+            last_status = None
+            while time.time() < deadline:
+                ping_response: Response = self.ai_session.get(ping_url, timeout=(10, 30))
+                ping_response.raise_for_status()
+                ping_data = ping_response.json()
+                tasks = ping_data.get("tasks") or {}
+                task_status = tasks.get(str(task_id))
+                if task_status != last_status:
+                    self.log(f"  Easy Diffusion task {task_id} status: {task_status or ping_data.get('status')}")
+                    last_status = task_status
+                if task_status in {"buffer", "completed"}:
+                    stream_response: Response = self.ai_session.get(stream_url, timeout=(10, 600))
+                    stream_response.raise_for_status()
+                    documents = self.ai_parse_stream_response(stream_response.text)
+                    final_document = next(
+                        (document for document in reversed(documents) if isinstance(document, dict) and document.get("output")),
+                        documents[-1] if documents else {},
+                    )
+                    if final_document.get("status") not in {"succeeded", "success", "completed"}:
+                        raise RuntimeError(
+                            f"Easy Diffusion stream ended without a successful result: {final_document.get('status')}"
+                        )
+                    images = final_document.get("output") or []
+                    if not images:
+                        raise RuntimeError("Easy Diffusion completed without returning an image")
+                    output_image = images[0]
+                    image_data = output_image.get("data")
+                    if not image_data:
+                        raise RuntimeError("Easy Diffusion response did not include image data")
+                    stylized = base64_png_to_frame(image_data, (target_width, target_height))
+                    if stylized.shape[1] != frame.shape[1] or stylized.shape[0] != frame.shape[0]:
+                        stylized = cv2.resize(stylized, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_LINEAR)
+                    return stylized, True
+                if task_status in {"failed", "stopped"}:
+                    raise RuntimeError(f"Easy Diffusion task ended with status: {task_status}")
+                time.sleep(0.5)
+            raise TimeoutError("Timed out waiting for Easy Diffusion to complete the stylization task")
+        except Exception as exc:
+            if not self.ai_backend_warning_shown:
+                self.log(f"  AI stylization disabled for this render: {exc}")
+                self.log("  Check that Easy Diffusion is running and reachable at the configured URL.")
+                self.ai_backend_warning_shown = True
+            return frame, False
 
     @staticmethod
     def describe_audio_style(audio_features):
@@ -1226,6 +1438,8 @@ class GlitchProcessor:
                 flash_decay_until = -1
                 flash_peak = 0.0
                 segment_frames = []
+                ai_anchor = None
+                ai_anchor_frame_idx = -1
                 for frame_idx, f in enumerate(chunk):
                     if self.stop_requested:
                         break
@@ -1279,6 +1493,36 @@ class GlitchProcessor:
                         f = apply_hue_shift(f, hue_shift_highs, self.sensitivity, hue_shift_amount)
                     if self.vignette and vignette_amount > 0:
                         f = apply_vignette(f, vignette_bass, self.sensitivity, vignette_amount)
+                    if self.ai_stylization_active():
+                        if self.ai_segment_anchor_only:
+                            if ai_anchor is None:
+                                ai_anchor, ai_ok = self.ai_render_frame(f)
+                                if ai_ok:
+                                    self.log(f"  AI anchor generated for segment {i + 1}/{len(cut_times)}")
+                                else:
+                                    ai_anchor = None
+                        else:
+                            should_refresh_ai = (
+                                ai_anchor is None
+                                or frame_idx == 0
+                                or (frame_idx - ai_anchor_frame_idx) >= self.ai_every_n_frames
+                            )
+                            if should_refresh_ai:
+                                ai_anchor, ai_ok = self.ai_render_frame(f)
+                                if ai_ok:
+                                    ai_anchor_frame_idx = frame_idx
+                                    self.log(f"  AI frame refreshed at segment {i + 1}/{len(cut_times)} frame {frame_idx + 1}/{len(chunk)}")
+                                else:
+                                    ai_anchor = None
+                        if ai_anchor is not None and self.ai_blend > 0:
+                            if self.ai_segment_anchor_only:
+                                f = cv2.addWeighted(f, 1 - self.ai_blend, ai_anchor, self.ai_blend, 0)
+                            else:
+                                since_anchor = max(0, frame_idx - ai_anchor_frame_idx)
+                                interval_progress = np.clip(since_anchor / max(1, self.ai_every_n_frames), 0, 1)
+                                blend = self.ai_blend * (1.0 - (interval_progress * 0.5))
+                                if blend > 0:
+                                    f = cv2.addWeighted(f, 1 - blend, ai_anchor, blend, 0)
                     if self.lut is not None:
                         f = apply_cube_lut(f, self.lut)
                     out.write(f)
@@ -1400,6 +1644,22 @@ class GlitchGUI:
         self.output_resolution_label = tk.StringVar(value="Auto (first input)")
         self.export_quality_label = tk.StringVar(value="High quality (slower)")
         self.increment_output_if_exists = tk.BooleanVar(value=False)
+        self.experimental_mode = tk.BooleanVar(value=False)
+        self.ai_panel_visible = self.experimental_mode
+        self.ai_enabled = tk.BooleanVar(value=False)
+        self.ai_segment_anchor_only = tk.BooleanVar(value=True)
+        self.ai_backend_url = tk.StringVar(value=AI_DEFAULT_BACKEND_URL)
+        self.ai_prompt = tk.StringVar(value=AI_DEFAULT_PROMPT)
+        self.ai_negative_prompt = tk.StringVar(value=AI_DEFAULT_NEGATIVE_PROMPT)
+        self.ai_every_n_frames = tk.IntVar(value=AI_DEFAULT_EVERY_N_FRAMES)
+        self.ai_denoise = tk.DoubleVar(value=AI_DEFAULT_DENOISE)
+        self.ai_denoise_label = None
+        self.ai_cfg_scale = tk.DoubleVar(value=AI_DEFAULT_CFG_SCALE)
+        self.ai_cfg_scale_label = None
+        self.ai_steps = tk.IntVar(value=AI_DEFAULT_STEPS)
+        self.ai_max_dim = tk.IntVar(value=AI_DEFAULT_MAX_DIM)
+        self.ai_blend = tk.DoubleVar(value=AI_DEFAULT_BLEND)
+        self.ai_blend_label = None
         self.duration, self.fps, self.coherence, self.sensitivity = tk.DoubleVar(value=0.10), tk.IntVar(value=30), tk.DoubleVar(value=0.20), tk.DoubleVar(value=1.0)
         self.source_variety = tk.DoubleVar(value=0.0)
         self.source_variety_label = None
@@ -1480,6 +1740,13 @@ class GlitchGUI:
         file_menu.add_separator()
         file_menu.add_command(label="Clear Analysis Cache...", command=self.clear_analysis_cache)
         menubar.add_cascade(label="File", menu=file_menu)
+        options_menu = tk.Menu(menubar, tearoff=0)
+        options_menu.add_checkbutton(
+            label="Experimental mode",
+            variable=self.experimental_mode,
+            command=self.toggle_experimental_mode,
+        )
+        menubar.add_cascade(label="Options", menu=options_menu)
         self.root.config(menu=menubar)
 
     def clear_analysis_cache(self):
@@ -1609,6 +1876,69 @@ class GlitchGUI:
         ttk.Button(set_f, text="Load Style", command=self.load_named_style).grid(row=10, column=2, sticky="ew")
         ttk.Button(set_f, text="Auto Style", command=self.auto_style).grid(row=11, column=1, sticky="ew")
         ttk.Button(set_f, text="Delete Style", command=self.delete_named_style).grid(row=11, column=2, sticky="ew")
+        self.ai_frame = ttk.LabelFrame(set_f, text="Experimental AI Stylization", padding="10")
+        self.ai_frame.grid(row=13, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        self.ai_frame.columnconfigure(1, weight=1)
+        ttk.Checkbutton(self.ai_frame, text="Enable AI stylization", variable=self.ai_enabled).grid(row=0, column=0, sticky="w")
+        ttk.Label(self.ai_frame, text="Easy Diffusion URL:").grid(row=1, column=0, sticky="w")
+        ai_backend_entry = ttk.Entry(self.ai_frame, textvariable=self.ai_backend_url)
+        ai_backend_entry.grid(row=1, column=1, sticky="ew")
+        ttk.Label(self.ai_frame, text="Prompt:").grid(row=2, column=0, sticky="w")
+        ai_prompt_entry = ttk.Entry(self.ai_frame, textvariable=self.ai_prompt)
+        ai_prompt_entry.grid(row=2, column=1, sticky="ew")
+        ttk.Label(self.ai_frame, text="Negative:").grid(row=3, column=0, sticky="w")
+        ai_negative_entry = ttk.Entry(self.ai_frame, textvariable=self.ai_negative_prompt)
+        ai_negative_entry.grid(row=3, column=1, sticky="ew")
+        ttk.Label(self.ai_frame, text="Every N frames:").grid(row=4, column=0, sticky="w")
+        ai_every_spin = ttk.Spinbox(self.ai_frame, from_=1, to=120, textvariable=self.ai_every_n_frames, width=6)
+        ai_every_spin.grid(row=4, column=1, sticky="w")
+        ttk.Label(self.ai_frame, text="Denoise:").grid(row=5, column=0, sticky="w")
+        ai_denoise_controls = ttk.Frame(self.ai_frame)
+        ai_denoise_controls.grid(row=5, column=1, sticky="ew")
+        ai_denoise_controls.columnconfigure(0, weight=1)
+        ai_denoise_scale = ttk.Scale(ai_denoise_controls, from_=0.05, to=0.95, variable=self.ai_denoise, command=lambda e: self.update_ai_denoise_label())
+        ai_denoise_scale.grid(row=0, column=0, sticky="ew")
+        self.ai_denoise_label = ttk.Label(ai_denoise_controls, text=f"{self.ai_denoise.get():.2f}", width=5)
+        self.ai_denoise_label.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Label(self.ai_frame, text="CFG scale:").grid(row=6, column=0, sticky="w")
+        ai_cfg_controls = ttk.Frame(self.ai_frame)
+        ai_cfg_controls.grid(row=6, column=1, sticky="ew")
+        ai_cfg_controls.columnconfigure(0, weight=1)
+        ai_cfg_scale = ttk.Scale(ai_cfg_controls, from_=1.0, to=20.0, variable=self.ai_cfg_scale, command=lambda e: self.update_ai_cfg_scale_label())
+        ai_cfg_scale.grid(row=0, column=0, sticky="ew")
+        self.ai_cfg_scale_label = ttk.Label(ai_cfg_controls, text=f"{self.ai_cfg_scale.get():.2f}", width=5)
+        self.ai_cfg_scale_label.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Label(self.ai_frame, text="Steps:").grid(row=7, column=0, sticky="w")
+        ai_steps_spin = ttk.Spinbox(self.ai_frame, from_=1, to=40, textvariable=self.ai_steps, width=6)
+        ai_steps_spin.grid(row=7, column=1, sticky="w")
+        ttk.Label(self.ai_frame, text="Max dimension:").grid(row=8, column=0, sticky="w")
+        ai_max_dim_spin = ttk.Spinbox(self.ai_frame, from_=128, to=1024, increment=64, textvariable=self.ai_max_dim, width=6)
+        ai_max_dim_spin.grid(row=8, column=1, sticky="w")
+        ttk.Label(self.ai_frame, text="Blend strength:").grid(row=9, column=0, sticky="w")
+        ai_blend_controls = ttk.Frame(self.ai_frame)
+        ai_blend_controls.grid(row=9, column=1, sticky="ew")
+        ai_blend_controls.columnconfigure(0, weight=1)
+        ai_blend_scale = ttk.Scale(ai_blend_controls, from_=0.0, to=1.0, variable=self.ai_blend, command=lambda e: self.update_ai_blend_label())
+        ai_blend_scale.grid(row=0, column=0, sticky="ew")
+        self.ai_blend_label = ttk.Label(ai_blend_controls, text=f"{self.ai_blend.get():.2f}", width=5)
+        self.ai_blend_label.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ai_segment_anchor = ttk.Checkbutton(self.ai_frame, text="Segment anchor only", variable=self.ai_segment_anchor_only)
+        ai_segment_anchor.grid(row=10, column=0, sticky="w")
+
+        self.add_tooltip(ai_backend_entry, "Base URL for your local Easy Diffusion instance, usually http://127.0.0.1:9000.")
+        self.add_tooltip(ai_prompt_entry, "Prompt sent to the image model for stylization.")
+        self.add_tooltip(ai_negative_entry, "Negative prompt to suppress unwanted artifacts.")
+        self.add_tooltip(ai_every_spin, "How often to refresh the AI anchor frame; higher values are faster.")
+        self.add_tooltip(ai_denoise_scale, "How strongly the model reinterprets the frame.")
+        self.add_tooltip(ai_cfg_scale, "Prompt adherence. Lower values usually preserve motion better.")
+        self.add_tooltip(ai_steps_spin, "Inference steps per stylized anchor frame.")
+        self.add_tooltip(ai_max_dim_spin, "Downscale the AI input to cap VRAM usage and latency.")
+        self.add_tooltip(ai_blend_scale, "How strongly the stylized anchor influences the final video frame.")
+        self.add_tooltip(ai_segment_anchor, "When enabled, only one stylized anchor is generated per source segment.")
+        self.update_ai_denoise_label()
+        self.update_ai_cfg_scale_label()
+        self.update_ai_blend_label()
+        self.toggle_experimental_mode()
 
         self.add_tooltip(beat_sync_cb, "Enable beat detection so clip boundaries follow the music.")
         self.add_tooltip(output_name_mode, "When enabled, existing output files are preserved and a numeric suffix is added.")
@@ -1663,6 +1993,14 @@ class GlitchGUI:
         self.log_t.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n"); self.log_t.see(tk.END)
     def add_tooltip(self, widget, text):
         self.tooltips.append(ToolTip(widget, text))
+    def toggle_experimental_mode(self):
+        if not hasattr(self, "ai_frame"):
+            return
+        if self.experimental_mode.get():
+            self.ai_frame.grid()
+        else:
+            self.ai_enabled.set(False)
+            self.ai_frame.grid_remove()
     def add_effect_control(self, parent, row, label, enabled_var, amount_name, max_value=2.0):
         check = ttk.Checkbutton(parent, text=label, variable=enabled_var)
         check.grid(row=row, column=0, sticky="w")
@@ -1690,6 +2028,15 @@ class GlitchGUI:
     def update_color_match_strength_label(self):
         if self.color_match_strength_label:
             self.color_match_strength_label.config(text=f"{self.color_match_strength.get():.2f}")
+    def update_ai_denoise_label(self):
+        if self.ai_denoise_label:
+            self.ai_denoise_label.config(text=f"{self.ai_denoise.get():.2f}")
+    def update_ai_cfg_scale_label(self):
+        if self.ai_cfg_scale_label:
+            self.ai_cfg_scale_label.config(text=f"{self.ai_cfg_scale.get():.2f}")
+    def update_ai_blend_label(self):
+        if self.ai_blend_label:
+            self.ai_blend_label.config(text=f"{self.ai_blend.get():.2f}")
     def load_styles_file(self):
         try:
             with open(STYLE_CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -1701,13 +2048,22 @@ class GlitchGUI:
             print(f"Could not load styles: {e}")
             styles = {}
         return self.with_builtin_styles(styles)
+    def normalize_ai_settings(self, settings):
+        if not isinstance(settings, dict):
+            return settings
+        ai_negative_prompt = settings.get("ai_negative_prompt")
+        if isinstance(ai_negative_prompt, str) and ai_negative_prompt.strip().rstrip(",") in AI_OBSOLETE_NEGATIVE_PROMPTS:
+            settings = dict(settings)
+            settings["ai_negative_prompt"] = AI_DEFAULT_NEGATIVE_PROMPT
+        return settings
     def with_builtin_styles(self, styles):
         deleted = set(styles.get("_deleted_builtin_styles", []))
         merged = json.loads(json.dumps({
             name: style for name, style in BUILTIN_STYLES.items()
             if name == DEFAULT_STYLE_NAME or name not in deleted
         }))
-        merged.update(styles)
+        for name, style in styles.items():
+            merged[name] = self.normalize_ai_settings(style) if isinstance(style, dict) else style
         merged[DEFAULT_STYLE_NAME] = json.loads(json.dumps(BUILTIN_STYLES[DEFAULT_STYLE_NAME]))
         return merged
     def save_styles_file(self):
@@ -1732,6 +2088,19 @@ class GlitchGUI:
             "output_resolution_label": self.output_resolution_label.get(),
             "export_quality_label": self.export_quality_label.get(),
             "increment_output_if_exists": self.increment_output_if_exists.get(),
+            "experimental_mode": self.experimental_mode.get(),
+            "ai_panel_visible": self.ai_panel_visible.get(),
+            "ai_enabled": self.ai_enabled.get(),
+            "ai_segment_anchor_only": self.ai_segment_anchor_only.get(),
+            "ai_backend_url": self.ai_backend_url.get(),
+            "ai_prompt": self.ai_prompt.get(),
+            "ai_negative_prompt": self.ai_negative_prompt.get(),
+            "ai_every_n_frames": self.ai_every_n_frames.get(),
+            "ai_denoise": self.ai_denoise.get(),
+            "ai_cfg_scale": self.ai_cfg_scale.get(),
+            "ai_steps": self.ai_steps.get(),
+            "ai_max_dim": self.ai_max_dim.get(),
+            "ai_blend": self.ai_blend.get(),
             "duration": self.duration.get(),
             "fps": self.fps.get(),
             "render_mode": self.render_mode.get(),
@@ -1899,6 +2268,22 @@ class GlitchGUI:
             else "High quality (slower)"
         )
         self.increment_output_if_exists.set(settings.get("increment_output_if_exists", self.increment_output_if_exists.get()))
+        experimental_mode = settings.get("experimental_mode")
+        if experimental_mode is None:
+            experimental_mode = settings.get("ai_panel_visible", self.experimental_mode.get())
+        self.experimental_mode.set(bool(experimental_mode))
+        self.ai_panel_visible.set(self.experimental_mode.get())
+        self.ai_enabled.set(settings.get("ai_enabled", self.ai_enabled.get()) if self.experimental_mode.get() else False)
+        self.ai_segment_anchor_only.set(settings.get("ai_segment_anchor_only", self.ai_segment_anchor_only.get()))
+        self.ai_backend_url.set(settings.get("ai_backend_url", self.ai_backend_url.get()))
+        self.ai_prompt.set(settings.get("ai_prompt", self.ai_prompt.get()))
+        self.ai_negative_prompt.set(self.normalize_ai_settings(settings).get("ai_negative_prompt", self.ai_negative_prompt.get()))
+        self.ai_every_n_frames.set(settings.get("ai_every_n_frames", self.ai_every_n_frames.get()))
+        self.ai_denoise.set(settings.get("ai_denoise", self.ai_denoise.get()))
+        self.ai_cfg_scale.set(settings.get("ai_cfg_scale", self.ai_cfg_scale.get()))
+        self.ai_steps.set(settings.get("ai_steps", self.ai_steps.get()))
+        self.ai_max_dim.set(settings.get("ai_max_dim", self.ai_max_dim.get()))
+        self.ai_blend.set(settings.get("ai_blend", self.ai_blend.get()))
         self.duration.set(settings.get("duration", self.duration.get()))
         self.fps.set(settings.get("fps", self.fps.get()))
         if settings.get("render_mode") in ("Full", "Snippet"):
@@ -1944,7 +2329,11 @@ class GlitchGUI:
         self.update_source_variety_label()
         self.update_music_match_label()
         self.update_color_match_strength_label()
+        self.update_ai_denoise_label()
+        self.update_ai_cfg_scale_label()
+        self.update_ai_blend_label()
         self.update_primary_focus_label()
+        self.toggle_experimental_mode()
     def save_named_style(self):
         name = self.style_name.get().strip()
         if not name:
@@ -2141,7 +2530,56 @@ class GlitchGUI:
             color_match_strength = self.color_match_strength.get() if self.color_match_enabled.get() else 0.0
             render_limit = self.snippet_duration.get() if self.render_mode.get() == "Snippet" else None
             output_resolution = OUTPUT_RESOLUTION_LABELS.get(self.output_resolution_label.get())
-            p = GlitchProcessor(self.inputs, self.audio.get(), resolved_output, self.duration.get(), self.fps.get(), self.pixelate.get(), self.flash.get(), self.rewind.get(), self.rgb_shift.get(), self.shake.get(), self.ghosting.get(), self.static_pan_zoom.get(), self.monochrome.get(), self.hue_shift.get(), self.vignette.get(), self.beat_sync.get(), self.coherence.get(), self.sensitivity.get(), export_mode, self.update_p, self.log_msg, self.display_frame, effect_amounts, primary_idx, primary_focus, self.beat_step.get(), self.beat_variation.get(), render_limit, self.source_variety.get(), self.music_match.get(), color_reference_idx, color_match_strength, self.lut_path.get().strip(), output_resolution, self.export_quality_label.get(), effect_timing)
+            p = GlitchProcessor(
+                self.inputs,
+                self.audio.get(),
+                resolved_output,
+                self.duration.get(),
+                self.fps.get(),
+                self.pixelate.get(),
+                self.flash.get(),
+                self.rewind.get(),
+                self.rgb_shift.get(),
+                self.shake.get(),
+                self.ghosting.get(),
+                self.static_pan_zoom.get(),
+                self.monochrome.get(),
+                self.hue_shift.get(),
+                self.vignette.get(),
+                self.beat_sync.get(),
+                self.coherence.get(),
+                self.sensitivity.get(),
+                export_mode,
+                self.update_p,
+                self.log_msg,
+                self.display_frame,
+                effect_amounts,
+                primary_idx,
+                primary_focus,
+                self.beat_step.get(),
+                self.beat_variation.get(),
+                render_limit,
+                self.source_variety.get(),
+                self.music_match.get(),
+                color_reference_idx,
+                color_match_strength,
+                self.lut_path.get().strip(),
+                output_resolution,
+                self.export_quality_label.get(),
+                effect_timing,
+                self.experimental_mode.get(),
+                self.ai_enabled.get(),
+                self.ai_segment_anchor_only.get(),
+                self.ai_backend_url.get(),
+                self.ai_prompt.get(),
+                self.ai_negative_prompt.get(),
+                self.ai_every_n_frames.get(),
+                self.ai_denoise.get(),
+                self.ai_cfg_scale.get(),
+                self.ai_steps.get(),
+                self.ai_max_dim.get(),
+                self.ai_blend.get(),
+            )
             self.active_processor = p
             if self.render_was_stopped:
                 p.stop_requested = True
