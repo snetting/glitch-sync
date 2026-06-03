@@ -618,8 +618,17 @@ def add_property(parent, name, value):
     return prop
 
 
-def write_shotcut_mlt(project_path, video_resources, audio_resource, segments, fps, width, height):
-    total_frames = sum(segment["frame_count"] for segment in segments)
+def write_shotcut_mlt(project_path, video_resources, audio_resource, segments, fps, width, height, rendered_segments=False):
+    if rendered_segments:
+        total_frames = 0
+        for index, segment in enumerate(segments):
+            segment["shotcut_in"] = total_frames
+            segment["shotcut_out"] = total_frames + segment["frame_count"] - 1
+            transition = segment.get("transition_out") or {}
+            transition_frames = 0 if transition.get("mode") == "Hard cut" else int(transition.get("frames", 0) or 0)
+            total_frames += segment["frame_count"] - transition_frames
+    else:
+        total_frames = sum(segment["frame_count"] for segment in segments)
     out_frame = frame_count_to_out(total_frames)
     out_time = frames_to_timecode(out_frame, fps)
     mlt = ET.Element("mlt", {
@@ -654,7 +663,10 @@ def write_shotcut_mlt(project_path, video_resources, audio_resource, segments, f
 
     producer_outs = {producer_id: 0 for producer_id in video_resources}
     for segment in segments:
-        producer_outs[segment["producer"]] = max(producer_outs[segment["producer"]], segment["out"])
+        if rendered_segments:
+            producer_outs[segment["producer"]] = max(producer_outs[segment["producer"]], segment["frame_count"] - 1)
+        else:
+            producer_outs[segment["producer"]] = max(producer_outs[segment["producer"]], segment["out"])
 
     for producer_id, resource in video_resources.items():
         producer_out = producer_outs[producer_id]
@@ -669,6 +681,21 @@ def write_shotcut_mlt(project_path, video_resources, audio_resource, segments, f
         add_property(producer, "shotcut:caption", os.path.basename(resource))
         add_property(producer, "shotcut:resource", resource)
         add_property(producer, "shotcut:skipConvert", "1")
+        if rendered_segments:
+            for segment_num, segment in enumerate(segments):
+                if segment["producer"] != producer_id:
+                    continue
+                comment = f"Segment {segment_num + 1}"
+                source_name = os.path.basename(segment.get("source_path", ""))
+                if source_name:
+                    comment += f" from {source_name}"
+                transition = segment.get("transition_out") or {}
+                transition_mode = transition.get("mode")
+                transition_frames = int(transition.get("frames", 0) or 0)
+                if transition_mode and transition_frames > 0:
+                    comment += f" -> {transition_mode.lower()} {transition_frames}f"
+                add_property(producer, "shotcut:comment", comment)
+                break
 
     audio = ET.SubElement(mlt, "producer", {"id": "audio0", "in": "0", "out": str(out_frame)})
     add_property(audio, "length", total_frames)
@@ -695,15 +722,36 @@ def write_shotcut_mlt(project_path, video_resources, audio_resource, segments, f
     background = ET.SubElement(mlt, "playlist", {"id": "background"})
     ET.SubElement(background, "entry", {"producer": "black", "in": "0", "out": str(out_frame)})
 
-    video_playlist = ET.SubElement(mlt, "playlist", {"id": "video_track"})
-    add_property(video_playlist, "shotcut:name", "V1")
-    add_property(video_playlist, "shotcut:video", "1")
-    for segment in segments:
-        ET.SubElement(video_playlist, "entry", {
-            "producer": segment["producer"],
-            "in": str(segment["in"]),
-            "out": str(segment["out"]),
-        })
+    if rendered_segments:
+        video_track_a = ET.SubElement(mlt, "playlist", {"id": "video_track_a"})
+        add_property(video_track_a, "shotcut:name", "V1")
+        add_property(video_track_a, "shotcut:video", "1")
+        video_track_b = ET.SubElement(mlt, "playlist", {"id": "video_track_b"})
+        add_property(video_track_b, "shotcut:name", "V2")
+        add_property(video_track_b, "shotcut:video", "1")
+        track_offsets = [0, 0]
+        for index, segment in enumerate(segments):
+            track_index = index % 2
+            track = video_track_a if track_index == 0 else video_track_b
+            start = segment["shotcut_in"]
+            if start > track_offsets[track_index]:
+                ET.SubElement(track, "blank", {"length": str(start - track_offsets[track_index])})
+            ET.SubElement(track, "entry", {
+                "producer": segment["producer"],
+                "in": "0",
+                "out": str(segment["frame_count"] - 1),
+            })
+            track_offsets[track_index] = start + segment["frame_count"]
+    else:
+        video_playlist = ET.SubElement(mlt, "playlist", {"id": "video_track"})
+        add_property(video_playlist, "shotcut:name", "V1")
+        add_property(video_playlist, "shotcut:video", "1")
+        for segment in segments:
+            ET.SubElement(video_playlist, "entry", {
+                "producer": segment["producer"],
+                "in": str(segment["in"]),
+                "out": str(segment["out"]),
+            })
 
     audio_playlist = ET.SubElement(mlt, "playlist", {"id": "audio_track"})
     add_property(audio_playlist, "shotcut:name", "A1")
@@ -723,13 +771,34 @@ def write_shotcut_mlt(project_path, video_resources, audio_resource, segments, f
     add_property(tractor, "shotcut:scaleFactor", "0")
     multitrack = ET.SubElement(tractor, "multitrack")
     ET.SubElement(multitrack, "track", {"producer": "background"})
-    ET.SubElement(multitrack, "track", {"producer": "video_track"})
-    ET.SubElement(multitrack, "track", {"producer": "audio_track"})
-    ET.SubElement(tractor, "transition", {"id": "transition0", "in": "0", "out": str(out_frame)})
-    add_property(tractor[-1], "mlt_service", "mix")
-    add_property(tractor[-1], "a_track", "0")
-    add_property(tractor[-1], "b_track", "1")
-    add_property(tractor[-1], "always_active", "1")
+    if rendered_segments:
+        ET.SubElement(multitrack, "track", {"producer": "video_track_a"})
+        ET.SubElement(multitrack, "track", {"producer": "video_track_b"})
+        ET.SubElement(multitrack, "track", {"producer": "audio_track"})
+        for index in range(max(0, len(segments) - 1)):
+            transition = segments[index].get("transition_out") or {}
+            transition_frames = 0 if transition.get("mode") == "Hard cut" else int(transition.get("frames", 0) or 0)
+            if transition_frames <= 0:
+                continue
+            transition_start = segments[index + 1]["shotcut_in"]
+            transition_end = transition_start + transition_frames - 1
+            transition_element = ET.SubElement(tractor, "transition", {
+                "id": f"transition{index}",
+                "in": str(transition_start),
+                "out": str(transition_end),
+            })
+            add_property(transition_element, "mlt_service", "luma")
+            add_property(transition_element, "a_track", "1")
+            add_property(transition_element, "b_track", "2")
+            add_property(transition_element, "always_active", "1")
+    else:
+        ET.SubElement(multitrack, "track", {"producer": "video_track"})
+        ET.SubElement(multitrack, "track", {"producer": "audio_track"})
+        transition_element = ET.SubElement(tractor, "transition", {"id": "transition0", "in": "0", "out": str(out_frame)})
+        add_property(transition_element, "mlt_service", "mix")
+        add_property(transition_element, "a_track", "0")
+        add_property(transition_element, "b_track", "1")
+        add_property(transition_element, "always_active", "1")
 
     with open(project_path, "wb") as f:
         f.write(prettify_xml(mlt))
@@ -1846,7 +1915,7 @@ class GlitchProcessor:
         temp_video = None
         out = None
         segment_dir = None
-        if self.export_mode == EXPORT_CUT_AWARE_MLT:
+        if self.export_mode == EXPORT_FINAL_VIDEO:
             temp_fd, temp_video = tempfile.mkstemp(suffix=".mp4", prefix="glitchsync_render_", dir=temp_root)
             os.close(temp_fd)
             out = LosslessVideoWriter(temp_video, width, height, self.fps)
@@ -1854,7 +1923,7 @@ class GlitchProcessor:
         reference_stats = color_stats.get(self.color_reference_idx) if self.color_reference_idx is not None else None
         segments = []
         rendered_frames = 0
-        if self.export_mode in (EXPORT_FINAL_VIDEO, EXPORT_CLIP_MLT):
+        if self.export_mode in (EXPORT_FINAL_VIDEO, EXPORT_CUT_AWARE_MLT, EXPORT_CLIP_MLT):
             package_dir = tempfile.mkdtemp(prefix="glitchsync_shotcut_", dir=temp_root)
             if self.export_mode == EXPORT_CLIP_MLT:
                 clip_dir = os.path.join(package_dir, "media", "clips")
@@ -1967,7 +2036,7 @@ class GlitchProcessor:
             ai_anchor_frame_idx = -1
             segment_writer = None
             segment_path = None
-            if self.export_mode == EXPORT_FINAL_VIDEO:
+            if self.export_mode in (EXPORT_FINAL_VIDEO, EXPORT_CUT_AWARE_MLT):
                 segment_path = os.path.join(segment_dir, f"segment_{i + 1:04d}.mp4")
                 segment_writer = LosslessVideoWriter(segment_path, width, height, self.fps)
             elif self.export_mode == EXPORT_CLIP_MLT:
@@ -2087,9 +2156,10 @@ class GlitchProcessor:
                     "transition_out": transition_out,
                 }
                 if self.export_mode == EXPORT_CUT_AWARE_MLT:
-                    segment["producer"] = "video0"
-                    segment["in"] = rendered_frames
-                    segment["out"] = rendered_frames + frame_count - 1
+                    segment["producer"] = f"video{len(segments)}"
+                    segment["resource"] = f"media/segments/{os.path.basename(segment_path)}"
+                    segment["in"] = 0
+                    segment["out"] = frame_count - 1
                 elif self.export_mode == EXPORT_CLIP_MLT:
                     segment["producer"] = f"video{len(segments)}"
                     segment["resource"] = f"media/clips/{os.path.basename(segment_path)}"
@@ -2300,21 +2370,25 @@ class GlitchProcessor:
             shutil.copy2(self.audio, os.path.join(media_dir, audio_name))
 
             if self.export_mode == EXPORT_CUT_AWARE_MLT:
-                video_name = "glitchsync_render.mp4"
-                video_path = os.path.join(media_dir, video_name)
-                preset, crf = self.export_quality_args()
-                self.log(f"  Export quality: {self.export_quality_label} (preset {preset}, CRF {crf})")
-                result = subprocess.run(['ffmpeg', '-y', '-i', temp_video, '-an', '-c:v', 'libx264', '-preset', preset, '-crf', crf, video_path], capture_output=True)
-                if result.returncode != 0:
-                    raise RuntimeError(result.stderr.decode(errors="ignore") or "ffmpeg failed while creating Shotcut video")
-                video_resources = {"video0": f"media/{video_name}"}
+                video_resources = {segment["producer"]: segment["resource"] for segment in segments}
             elif self.export_mode == EXPORT_CLIP_MLT:
                 video_resources = {segment["producer"]: segment["resource"] for segment in segments}
             else:
                 raise RuntimeError(f"Unsupported Shotcut export mode: {self.export_mode}")
 
             project_path = os.path.join(package_dir, "glitchsync_project.mlt")
-            write_shotcut_mlt(project_path, video_resources, audio_resource, segments, self.fps, width, height)
+            if self.export_mode == EXPORT_CUT_AWARE_MLT:
+                self.log("  Shotcut export: using rendered segment chunks with transition metadata")
+            write_shotcut_mlt(
+                project_path,
+                video_resources,
+                audio_resource,
+                segments,
+                self.fps,
+                width,
+                height,
+                rendered_segments=self.export_mode == EXPORT_CUT_AWARE_MLT,
+            )
             zip_directory(package_dir, output_zip)
             self.log(f"Shotcut archive written: {output_zip}")
         finally:
