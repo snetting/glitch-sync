@@ -368,8 +368,8 @@ def resolve_scene_transition_mode(mode, current_activity, next_activity):
     if drive >= SCENE_TRANSITION_AUTO_HARD_ACTIVITY or delta >= SCENE_TRANSITION_AUTO_HARD_DELTA:
         return "Hard cut"
     if drive <= SCENE_TRANSITION_AUTO_FAST_ACTIVITY and delta <= SCENE_TRANSITION_AUTO_FAST_DELTA:
-        return "Fast fade"
-    return "Hard cut"
+        return "Slow fade"
+    return "Fast fade"
 
 
 def scene_transition_fade_frames(mode, fps, current_frames, next_frames=None):
@@ -378,6 +378,18 @@ def scene_transition_fade_frames(mode, fps, current_frames, next_frames=None):
     fade_seconds = SCENE_TRANSITION_FAST_FADE_SECONDS if mode == "Fast fade" else SCENE_TRANSITION_SLOW_FADE_SECONDS
     max_frames = current_frames if next_frames is None else min(current_frames, next_frames)
     return max(1, min(max_frames, int(round(max(1, fps) * fade_seconds))))
+
+
+def scene_transition_ffmpeg_name(mode):
+    if mode == "Fast fade":
+        return "fadeblack"
+    if mode == "Slow fade":
+        return "fade"
+    return None
+
+
+def ffmpeg_concat_list_line(path):
+    return "file " + json.dumps(os.path.abspath(path))
 
 
 BUILTIN_STYLES = {
@@ -1716,17 +1728,25 @@ class GlitchProcessor:
         else:
             width, height = source_width, source_height
         self.log(f"  Output resolution: {width}x{height}")
-        temp_video = f"temp_{random.randint(1000, 9999)}.avi"
-        out = cv2.VideoWriter(temp_video, cv2.VideoWriter_fourcc(*'XVID'), self.fps, (width, height))
+        temp_video = None
+        out = None
+        segment_dir = None
+        if self.export_mode == EXPORT_CUT_AWARE_MLT:
+            temp_video = f"temp_{random.randint(1000, 9999)}.avi"
+            out = cv2.VideoWriter(temp_video, cv2.VideoWriter_fourcc(*'XVID'), self.fps, (width, height))
         caps, prev_f = [cv2.VideoCapture(f) for f in self.inputs], None
         reference_stats = color_stats.get(self.color_reference_idx) if self.color_reference_idx is not None else None
         activity_scale = self.motion_scale(activity_db)
         segments = []
         rendered_frames = 0
-        if self.export_mode == EXPORT_CLIP_MLT:
+        if self.export_mode in (EXPORT_FINAL_VIDEO, EXPORT_CLIP_MLT):
             package_dir = tempfile.mkdtemp(prefix="glitchsync_shotcut_")
-            clip_dir = os.path.join(package_dir, "media", "clips")
-            os.makedirs(clip_dir, exist_ok=True)
+            if self.export_mode == EXPORT_CLIP_MLT:
+                clip_dir = os.path.join(package_dir, "media", "clips")
+                os.makedirs(clip_dir, exist_ok=True)
+            else:
+                segment_dir = os.path.join(package_dir, "media", "segments")
+                os.makedirs(segment_dir, exist_ok=True)
 
         self.log("Rendering...")
         if self.use_primary_video():
@@ -1790,133 +1810,141 @@ class GlitchProcessor:
                     f"({transition_out['current_activity']:.2f} -> {transition_out['next_activity']:.2f}, "
                     f"{transition_out['frames']} frames)"
                 )
-
-                pixelate_amount = self.effect_amount("pixelate")
-                flash_amount = self.effect_amount("flash")
-                rgb_shift_amount = self.effect_amount("rgb_shift")
-                shake_amount = self.effect_amount("shake")
-                ghosting_amount = self.effect_amount("ghosting")
-                monochrome_amount = self.effect_amount("monochrome")
-                hue_shift_amount = self.effect_amount("hue_shift")
-                vignette_amount = self.effect_amount("vignette")
-                static_pan_zoom_amount = self.effect_amount("static_pan_zoom")
-                pixelate_frame_timing = self.resolve_effect_frame_timing("pixelate")
-                flash_frame_timing = self.resolve_effect_frame_timing("flash")
-                rgb_shift_frame_timing = self.resolve_effect_frame_timing("rgb_shift")
-                shake_frame_timing = self.resolve_effect_frame_timing("shake")
-                ghosting_frame_timing = self.resolve_effect_frame_timing("ghosting")
-                monochrome_frame_timing = self.resolve_effect_frame_timing("monochrome")
-                hue_shift_frame_timing = self.resolve_effect_frame_timing("hue_shift")
-                vignette_frame_timing = self.resolve_effect_frame_timing("vignette")
-                motion_score = self.segment_motion_score(motion_db, self.current_vid_idx, start_frame, len(chunk))
-                use_static_pan_zoom = (
-                    self.static_pan_zoom
-                    and static_pan_zoom_amount > 0
-                    and motion_score <= STATIC_MOTION_THRESHOLD
-                    and len(chunk) > 1
-                )
-                transform_overscan = 1.0
+            pixelate_amount = self.effect_amount("pixelate")
+            flash_amount = self.effect_amount("flash")
+            rgb_shift_amount = self.effect_amount("rgb_shift")
+            shake_amount = self.effect_amount("shake")
+            ghosting_amount = self.effect_amount("ghosting")
+            monochrome_amount = self.effect_amount("monochrome")
+            hue_shift_amount = self.effect_amount("hue_shift")
+            vignette_amount = self.effect_amount("vignette")
+            static_pan_zoom_amount = self.effect_amount("static_pan_zoom")
+            pixelate_frame_timing = self.resolve_effect_frame_timing("pixelate")
+            flash_frame_timing = self.resolve_effect_frame_timing("flash")
+            rgb_shift_frame_timing = self.resolve_effect_frame_timing("rgb_shift")
+            shake_frame_timing = self.resolve_effect_frame_timing("shake")
+            ghosting_frame_timing = self.resolve_effect_frame_timing("ghosting")
+            monochrome_frame_timing = self.resolve_effect_frame_timing("monochrome")
+            hue_shift_frame_timing = self.resolve_effect_frame_timing("hue_shift")
+            vignette_frame_timing = self.resolve_effect_frame_timing("vignette")
+            motion_score = self.segment_motion_score(motion_db, self.current_vid_idx, start_frame, len(chunk))
+            use_static_pan_zoom = (
+                self.static_pan_zoom
+                and static_pan_zoom_amount > 0
+                and motion_score <= STATIC_MOTION_THRESHOLD
+                and len(chunk) > 1
+            )
+            transform_overscan = 1.0
+            if use_static_pan_zoom:
+                transform_overscan += 0.10 * np.clip(static_pan_zoom_amount, 0, 1)
+            if self.shake and shake_amount > 0:
+                max_shake_offset = max(0, (1.0 - 0.2) * self.sensitivity * shake_amount * 60)
+                transform_overscan += min(0.12, (max_shake_offset * 2) / max(width, height))
+            pan_x, pan_y = random.uniform(-1, 1), random.uniform(-1, 1)
+            flash_decay_frames = max(3, int(self.fps * 0.12))
+            flash_decay_until = -1
+            flash_peak = 0.0
+            ai_segment_active = (
+                self.ai_stylization_active()
+                and random.random() < ai_segment_probability
+            )
+            ai_anchor = None
+            ai_anchor_frame_idx = -1
+            segment_writer = None
+            segment_path = None
+            if self.export_mode == EXPORT_FINAL_VIDEO:
+                segment_path = os.path.join(segment_dir, f"segment_{i + 1:04d}.avi")
+                segment_writer = cv2.VideoWriter(segment_path, cv2.VideoWriter_fourcc(*'XVID'), self.fps, (width, height))
+            elif self.export_mode == EXPORT_CLIP_MLT:
+                clip_name = f"clip_{len(segments) + 1:04d}.avi"
+                segment_path = os.path.join(clip_dir, clip_name)
+                segment_writer = cv2.VideoWriter(segment_path, cv2.VideoWriter_fourcc(*'XVID'), self.fps, (width, height))
+            for frame_idx, f in enumerate(chunk):
+                if self.stop_requested:
+                    break
+                frame_time = t_start + (frame_idx / self.fps)
+                frame_rms = norm_val(rms_energy, max_rms, frame_time)
+                frame_bass = norm_val(bass_energy, max_bass, frame_time)
+                frame_highs = norm_val(highs_energy, max_highs, frame_time)
+                frame_mids = norm_val(mids_energy, max_mids, frame_time)
+                pixelate_rms = frame_rms if pixelate_frame_timing else clip_rms
+                pixelate_highs = frame_highs if pixelate_frame_timing else clip_highs
+                flash_rms = frame_rms if flash_frame_timing else clip_rms
+                flash_highs = frame_highs if flash_frame_timing else clip_highs
+                rgb_shift_highs = frame_highs if rgb_shift_frame_timing else clip_highs
+                shake_bass = frame_bass if shake_frame_timing else clip_bass
+                ghosting_mids = frame_mids if ghosting_frame_timing else clip_mids
+                monochrome_mids = frame_mids if monochrome_frame_timing else clip_mids
+                hue_shift_highs = frame_highs if hue_shift_frame_timing else clip_highs
+                vignette_bass = frame_bass if vignette_frame_timing else clip_bass
+                f = fit_frame_to_output(f, width, height)
+                f = apply_center_zoom(f, transform_overscan)
                 if use_static_pan_zoom:
-                    transform_overscan += 0.10 * np.clip(static_pan_zoom_amount, 0, 1)
-                if self.shake and shake_amount > 0:
-                    max_shake_offset = max(0, (1.0 - 0.2) * self.sensitivity * shake_amount * 60)
-                    transform_overscan += min(0.12, (max_shake_offset * 2) / max(width, height))
-                pan_x, pan_y = random.uniform(-1, 1), random.uniform(-1, 1)
-                flash_decay_frames = max(3, int(self.fps * 0.12))
-                flash_decay_until = -1
-                flash_peak = 0.0
-                segment_frames = []
-                ai_segment_active = (
-                    self.ai_stylization_active()
-                    and random.random() < ai_segment_probability
+                    progress = frame_idx / max(1, len(chunk) - 1)
+                    f = apply_static_pan_zoom(f, progress, static_pan_zoom_amount, pan_x, pan_y)
+                if reference_stats and self.color_match_strength > 0:
+                    f = match_lab_color(f, color_stats.get(self.current_vid_idx), reference_stats, self.color_match_strength)
+                if self.pixelate and pixelate_amount > 0:
+                    f = apply_pixelate(f, pixelate_rms, pixelate_highs, self.sensitivity * pixelate_amount, pixelate_amount)
+                flash_can_trigger = (
+                    self.flash
+                    and flash_amount > 0
+                    and flash_highs > 0.55
+                    and flash_rms > 0.25
+                    and (flash_frame_timing or frame_idx == 0)
                 )
-                ai_anchor = None
-                ai_anchor_frame_idx = -1
-                for frame_idx, f in enumerate(chunk):
-                    if self.stop_requested:
-                        break
-                    frame_time = t_start + (frame_idx / self.fps)
-                    frame_rms = norm_val(rms_energy, max_rms, frame_time)
-                    frame_bass = norm_val(bass_energy, max_bass, frame_time)
-                    frame_highs = norm_val(highs_energy, max_highs, frame_time)
-                    frame_mids = norm_val(mids_energy, max_mids, frame_time)
-                    pixelate_rms = frame_rms if pixelate_frame_timing else clip_rms
-                    pixelate_highs = frame_highs if pixelate_frame_timing else clip_highs
-                    flash_rms = frame_rms if flash_frame_timing else clip_rms
-                    flash_highs = frame_highs if flash_frame_timing else clip_highs
-                    rgb_shift_highs = frame_highs if rgb_shift_frame_timing else clip_highs
-                    shake_bass = frame_bass if shake_frame_timing else clip_bass
-                    ghosting_mids = frame_mids if ghosting_frame_timing else clip_mids
-                    monochrome_mids = frame_mids if monochrome_frame_timing else clip_mids
-                    hue_shift_highs = frame_highs if hue_shift_frame_timing else clip_highs
-                    vignette_bass = frame_bass if vignette_frame_timing else clip_bass
-                    f = fit_frame_to_output(f, width, height)
-                    f = apply_center_zoom(f, transform_overscan)
-                    if use_static_pan_zoom:
-                        progress = frame_idx / max(1, len(chunk) - 1)
-                        f = apply_static_pan_zoom(f, progress, static_pan_zoom_amount, pan_x, pan_y)
-                    if reference_stats and self.color_match_strength > 0:
-                        f = match_lab_color(f, color_stats.get(self.current_vid_idx), reference_stats, self.color_match_strength)
-                    if self.pixelate and pixelate_amount > 0:
-                        f = apply_pixelate(f, pixelate_rms, pixelate_highs, self.sensitivity * pixelate_amount, pixelate_amount)
-                    flash_can_trigger = (
-                        self.flash
-                        and flash_amount > 0
-                        and flash_highs > 0.55
-                        and flash_rms > 0.25
-                        and (flash_frame_timing or frame_idx == 0)
-                    )
-                    if flash_can_trigger:
-                        new_flash_peak = ((flash_highs - 0.55) / 0.45) * flash_rms
-                        flash_peak = max(flash_peak, new_flash_peak) if frame_idx < flash_decay_until else new_flash_peak
-                        flash_decay_until = frame_idx + flash_decay_frames
-                    if self.flash and flash_amount > 0 and frame_idx < flash_decay_until:
-                        decay = (flash_decay_until - frame_idx) / flash_decay_frames
-                        f = apply_flash_boost(f, flash_peak * decay, self.sensitivity * flash_amount)
-                    if self.rgb_shift and rgb_shift_amount > 0:
-                        f = apply_rgb_shift(f, rgb_shift_highs, self.sensitivity * rgb_shift_amount)
-                    if self.shake and shake_amount > 0:
-                        f = apply_shake(f, shake_bass, self.sensitivity * shake_amount)
-                    if self.ghosting and ghosting_amount > 0:
-                        f = apply_ghosting(f, prev_f, ghosting_mids, self.sensitivity * ghosting_amount)
-                    if self.monochrome and monochrome_amount > 0:
-                        f = apply_monochrome(f, monochrome_mids, self.sensitivity, monochrome_amount)
-                    if self.hue_shift and hue_shift_amount > 0:
-                        f = apply_hue_shift(f, hue_shift_highs, self.sensitivity, hue_shift_amount)
-                    if self.vignette and vignette_amount > 0:
-                        f = apply_vignette(f, vignette_bass, self.sensitivity, vignette_amount)
-                    if ai_segment_active:
-                        if self.ai_segment_anchor_only:
-                            if ai_anchor is None:
-                                ai_anchor, ai_ok = self.ai_render_frame(f)
-                                if ai_ok:
-                                    self.log(f"  AI anchor generated for segment {i + 1}/{len(planned_segments)}")
-                                else:
-                                    ai_anchor = None
-                        else:
-                            should_refresh_ai = (
-                                ai_anchor is None
-                                or frame_idx == 0
-                                or (frame_idx - ai_anchor_frame_idx) >= self.ai_every_n_frames
-                            )
-                            if should_refresh_ai:
-                                ai_anchor, ai_ok = self.ai_render_frame(f)
-                                if ai_ok:
-                                    ai_anchor_frame_idx = frame_idx
-                                    self.log(f"  AI frame refreshed at segment {i + 1}/{len(planned_segments)} frame {frame_idx + 1}/{len(chunk)}")
-                                else:
-                                    ai_anchor = None
-                        if ai_anchor is not None and self.ai_blend > 0:
-                            if self.ai_segment_anchor_only:
-                                f = cv2.addWeighted(f, 1 - self.ai_blend, ai_anchor, self.ai_blend, 0)
+                if flash_can_trigger:
+                    new_flash_peak = ((flash_highs - 0.55) / 0.45) * flash_rms
+                    flash_peak = max(flash_peak, new_flash_peak) if frame_idx < flash_decay_until else new_flash_peak
+                    flash_decay_until = frame_idx + flash_decay_frames
+                if self.flash and flash_amount > 0 and frame_idx < flash_decay_until:
+                    decay = (flash_decay_until - frame_idx) / flash_decay_frames
+                    f = apply_flash_boost(f, flash_peak * decay, self.sensitivity * flash_amount)
+                if self.rgb_shift and rgb_shift_amount > 0:
+                    f = apply_rgb_shift(f, rgb_shift_highs, self.sensitivity * rgb_shift_amount)
+                if self.shake and shake_amount > 0:
+                    f = apply_shake(f, shake_bass, self.sensitivity * shake_amount)
+                if self.ghosting and ghosting_amount > 0:
+                    f = apply_ghosting(f, prev_f, ghosting_mids, self.sensitivity * ghosting_amount)
+                if self.monochrome and monochrome_amount > 0:
+                    f = apply_monochrome(f, monochrome_mids, self.sensitivity, monochrome_amount)
+                if self.hue_shift and hue_shift_amount > 0:
+                    f = apply_hue_shift(f, hue_shift_highs, self.sensitivity, hue_shift_amount)
+                if self.vignette and vignette_amount > 0:
+                    f = apply_vignette(f, vignette_bass, self.sensitivity, vignette_amount)
+                if ai_segment_active:
+                    if self.ai_segment_anchor_only:
+                        if ai_anchor is None:
+                            ai_anchor, ai_ok = self.ai_render_frame(f)
+                            if ai_ok:
+                                self.log(f"  AI anchor generated for segment {i + 1}/{len(planned_segments)}")
                             else:
-                                since_anchor = max(0, frame_idx - ai_anchor_frame_idx)
-                                interval_progress = np.clip(since_anchor / max(1, self.ai_every_n_frames), 0, 1)
-                                blend = self.ai_blend * (1.0 - (interval_progress * 0.5))
-                                if blend > 0:
-                                    f = cv2.addWeighted(f, 1 - blend, ai_anchor, blend, 0)
-                    if self.lut is not None:
-                        f = apply_cube_lut(f, self.lut)
+                                ai_anchor = None
+                    else:
+                        should_refresh_ai = (
+                            ai_anchor is None
+                            or frame_idx == 0
+                            or (frame_idx - ai_anchor_frame_idx) >= self.ai_every_n_frames
+                        )
+                        if should_refresh_ai:
+                            ai_anchor, ai_ok = self.ai_render_frame(f)
+                            if ai_ok:
+                                ai_anchor_frame_idx = frame_idx
+                                self.log(f"  AI frame refreshed at segment {i + 1}/{len(planned_segments)} frame {frame_idx + 1}/{len(chunk)}")
+                            else:
+                                ai_anchor = None
+                    if ai_anchor is not None and self.ai_blend > 0:
+                        if self.ai_segment_anchor_only:
+                            f = cv2.addWeighted(f, 1 - self.ai_blend, ai_anchor, self.ai_blend, 0)
+                        else:
+                            since_anchor = max(0, frame_idx - ai_anchor_frame_idx)
+                            interval_progress = np.clip(since_anchor / max(1, self.ai_every_n_frames), 0, 1)
+                            blend = self.ai_blend * (1.0 - (interval_progress * 0.5))
+                            if blend > 0:
+                                f = cv2.addWeighted(f, 1 - blend, ai_anchor, blend, 0)
+                if self.lut is not None:
+                    f = apply_cube_lut(f, self.lut)
+                if out is not None:
                     transition_alpha = 1.0
                     if transition_in and transition_in["frames"] > 0 and frame_idx < transition_in["frames"]:
                         if transition_in["frames"] > 1:
@@ -1927,12 +1955,15 @@ class GlitchProcessor:
                     if transition_alpha < 1.0:
                         f = cv2.convertScaleAbs(f, alpha=max(0.0, transition_alpha), beta=0)
                     out.write(f)
-                    if self.export_mode == EXPORT_CLIP_MLT:
-                        segment_frames.append(f)
-                    prev_f = f.copy()
+                if segment_writer is not None:
+                    segment_writer.write(f)
+                prev_f = f.copy()
+
+            if segment_writer is not None:
+                segment_writer.release()
 
             if chunk and not self.stop_requested:
-                frame_count = len(segment_frames) if self.export_mode == EXPORT_CLIP_MLT else len(chunk)
+                frame_count = len(chunk)
                 segment = {
                     "timeline_in": rendered_frames,
                     "timeline_out": rendered_frames + frame_count - 1,
@@ -1945,16 +1976,12 @@ class GlitchProcessor:
                     segment["in"] = rendered_frames
                     segment["out"] = rendered_frames + frame_count - 1
                 elif self.export_mode == EXPORT_CLIP_MLT:
-                    clip_name = f"clip_{len(segments) + 1:04d}.avi"
-                    clip_path = os.path.join(clip_dir, clip_name)
-                    clip_out = cv2.VideoWriter(clip_path, cv2.VideoWriter_fourcc(*'XVID'), self.fps, (width, height))
-                    for frame in segment_frames:
-                        clip_out.write(frame)
-                    clip_out.release()
                     segment["producer"] = f"video{len(segments)}"
-                    segment["resource"] = f"media/clips/{clip_name}"
+                    segment["resource"] = f"media/clips/{os.path.basename(segment_path)}"
                     segment["in"] = 0
                     segment["out"] = frame_count - 1
+                elif self.export_mode == EXPORT_FINAL_VIDEO:
+                    segment["resource"] = segment_path
                 segments.append(segment)
                 rendered_frames += frame_count
 
@@ -1965,12 +1992,13 @@ class GlitchProcessor:
                 self.progress_callback(i, len(planned_segments))
             
         for c in caps: c.release()
-        out.release()
+        if out is not None:
+            out.release()
         if not self.stop_requested:
             self.log("Exporting final stage...")
             if self.progress_callback: self.progress_callback(-1, -1)
             if self.export_mode == EXPORT_FINAL_VIDEO:
-                self.export_final_video(temp_video)
+                self.export_final_video_from_segments(segments, width, height, package_dir)
             else:
                 self.export_shotcut_archive(temp_video, segments, width, height, package_dir)
             if match_segments:
@@ -1979,7 +2007,7 @@ class GlitchProcessor:
                     f"brightness {match_brightness_total / match_segments:.2f}, "
                     f"activity {match_activity_total / match_segments:.2f} over {match_segments} segments"
                 )
-        if os.path.exists(temp_video): os.remove(temp_video)
+        if temp_video and os.path.exists(temp_video): os.remove(temp_video)
         if package_dir and os.path.exists(package_dir): shutil.rmtree(package_dir)
         if self.stop_requested:
             self.log("Stopped.")
@@ -1997,6 +2025,134 @@ class GlitchProcessor:
             if os.path.exists(final_temp):
                 os.remove(final_temp)
             raise RuntimeError(result.stderr.decode(errors="ignore") or "ffmpeg failed while creating final video")
+        os.replace(final_temp, self.output)
+
+    def _concat_video_segments(self, input_paths, output_path):
+        if not input_paths:
+            raise RuntimeError("No segment clips available for concatenation")
+        preset, crf = self.export_quality_args()
+        if len(input_paths) == 1:
+            result = subprocess.run([
+                'ffmpeg', '-y', '-i', input_paths[0],
+                '-c:v', 'libx264', '-preset', preset, '-crf', crf,
+                '-pix_fmt', 'yuv420p', '-an', output_path
+            ], capture_output=True)
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.decode(errors="ignore") or "ffmpeg failed while encoding a segment block")
+            return
+        list_file = tempfile.NamedTemporaryFile("w", delete=False, suffix=".txt", encoding="utf-8")
+        try:
+            for path in input_paths:
+                list_file.write(f"file {json.dumps(os.path.abspath(path))}\n")
+            list_file.flush()
+            list_file.close()
+            result = subprocess.run([
+                'ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', list_file.name,
+                '-c:v', 'libx264', '-preset', preset, '-crf', crf,
+                '-pix_fmt', 'yuv420p', '-an', output_path
+            ], capture_output=True)
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.decode(errors="ignore") or "ffmpeg failed while concatenating a segment block")
+        finally:
+            try:
+                os.remove(list_file.name)
+            except Exception:
+                pass
+
+    def export_final_video_from_segments(self, segments, width, height, package_dir):
+        if not segments:
+            raise RuntimeError("No rendered segments to export")
+
+        preset, crf = self.export_quality_args()
+        self.log(f"  Export quality: {self.export_quality_label} (preset {preset}, CRF {crf})")
+        work_dir = os.path.join(package_dir, "media")
+        block_dir = os.path.join(work_dir, "blocks")
+        os.makedirs(block_dir, exist_ok=True)
+
+        blocks = []
+        current_block = [segments[0]]
+        for idx in range(len(segments) - 1):
+            transition = segments[idx].get("transition_out") or {}
+            if transition.get("mode") == "Hard cut":
+                current_block.append(segments[idx + 1])
+                continue
+            blocks.append({
+                "segments": current_block,
+                "transition": transition,
+            })
+            current_block = [segments[idx + 1]]
+        blocks.append({"segments": current_block, "transition": None})
+
+        block_paths = []
+        block_durations = []
+        for block_idx, block in enumerate(blocks):
+            block_segments = block["segments"]
+            block_paths_input = [segment["resource"] for segment in block_segments]
+            block_path = os.path.join(block_dir, f"block_{block_idx + 1:04d}.mp4")
+            self._concat_video_segments(block_paths_input, block_path)
+            block_paths.append(block_path)
+            block_durations.append(sum(segment["frame_count"] / max(self.fps, 1) for segment in block_segments))
+
+        if len(block_paths) == 1:
+            temp_video = block_paths[0]
+        else:
+            xfade_inputs = []
+            filter_parts = []
+            output_label = None
+            output_cursor = block_durations[0]
+            for block_idx, block_path in enumerate(block_paths):
+                xfade_inputs.extend(['-i', block_path])
+            for idx in range(len(block_paths) - 1):
+                transition = blocks[idx].get("transition") or {}
+                mode = transition.get("mode", "Fast fade")
+                xfade_name = scene_transition_ffmpeg_name(mode)
+                if not xfade_name:
+                    xfade_name = "fade"
+                transition_frames = max(1, int(transition.get("frames", 1)))
+                duration_seconds = transition_frames / max(self.fps, 1)
+                offset = max(0.0, output_cursor - duration_seconds)
+                output_label = f"v{idx + 1}"
+                if idx == 0:
+                    filter_parts.append(
+                        f"[0:v][1:v]xfade=transition={xfade_name}:duration={duration_seconds:.6f}:offset={offset:.6f}[{output_label}]"
+                    )
+                else:
+                    prev_label = f"v{idx}"
+                    filter_parts.append(
+                        f"[{prev_label}][{idx + 1}:v]xfade=transition={xfade_name}:duration={duration_seconds:.6f}:offset={offset:.6f}[{output_label}]"
+                    )
+                output_cursor = output_cursor + block_durations[idx + 1] - duration_seconds
+            temp_video = os.path.join(work_dir, f"glitchsync_dissolve_{random.randint(1000, 9999)}.mp4")
+            result = subprocess.run([
+                'ffmpeg', '-y',
+                *xfade_inputs,
+                '-filter_complex', ';'.join(filter_parts),
+                '-map', f"[{output_label}]",
+                '-an',
+                '-c:v', 'libx264',
+                '-preset', preset,
+                '-crf', crf,
+                '-pix_fmt', 'yuv420p',
+                temp_video,
+            ], capture_output=True)
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr.decode(errors="ignore") or "ffmpeg failed while assembling dissolve transitions")
+
+        root, ext = os.path.splitext(self.output)
+        final_temp = f"{root or self.output}.tmp_{random.randint(1000, 9999)}{ext or '.mp4'}"
+        result = subprocess.run([
+            'ffmpeg', '-y', '-i', temp_video,
+            '-i', self.audio,
+            '-c:v', 'copy',
+            '-c:a', 'aac',
+            '-b:a', '192k',
+            '-shortest',
+            final_temp,
+        ], capture_output=True)
+        if result.returncode != 0:
+            if os.path.exists(final_temp):
+                os.remove(final_temp)
+            raise RuntimeError(result.stderr.decode(errors="ignore") or "ffmpeg failed while muxing final audio")
         os.replace(final_temp, self.output)
 
     def export_shotcut_archive(self, temp_video, segments, width, height, package_dir=None):
@@ -2470,8 +2626,8 @@ class GlitchGUI:
         self.add_tooltip(source_variety_scale, "Higher values spread selections across sources more aggressively.")
         self.add_tooltip(music_match_label, "Bias frame selection toward source motion that matches the audio energy.")
         self.add_tooltip(music_match_scale, "Higher values make audio energy influence source choice more strongly.")
-        self.add_tooltip(scene_transition_label, "Automatically choose hard cuts or fades from audio activity, or force a single transition style.")
-        self.add_tooltip(scene_transition_combo, "Auto favors hard cuts in active sections and longer fades in calmer sections.")
+        self.add_tooltip(scene_transition_label, "Automatically choose hard cuts, quick fades, or longer dissolves from audio activity, or force one transition style.")
+        self.add_tooltip(scene_transition_combo, "Auto favors hard cuts in active sections, quick fades in moderate sections, and longer dissolves in calmer sections.")
         self.add_tooltip(sensitivity_label, "Amplify or soften all enabled video effects.")
         self.add_tooltip(sensitivity_scale, "Higher values make enabled effects stronger and easier to trigger.")
         self.add_tooltip(fps_label, "Frames per second for the exported video.")
