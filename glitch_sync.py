@@ -1619,6 +1619,7 @@ class GlitchProcessor:
                 1,
             )
             segment_profiles.append(profile)
+        activity_scale = self.motion_scale(activity_db)
         saved_log = self.log
         saved_random_state = random.getstate()
         saved_np_state = np.random.get_state()
@@ -1736,7 +1737,6 @@ class GlitchProcessor:
             out = cv2.VideoWriter(temp_video, cv2.VideoWriter_fourcc(*'XVID'), self.fps, (width, height))
         caps, prev_f = [cv2.VideoCapture(f) for f in self.inputs], None
         reference_stats = color_stats.get(self.color_reference_idx) if self.color_reference_idx is not None else None
-        activity_scale = self.motion_scale(activity_db)
         segments = []
         rendered_frames = 0
         if self.export_mode in (EXPORT_FINAL_VIDEO, EXPORT_CLIP_MLT):
