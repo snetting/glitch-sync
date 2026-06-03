@@ -35,8 +35,8 @@ EXPORT_CLIP_MLT = "clip_mlt"
 
 EXPORT_MODE_LABELS = {
     "Final video (MP4)": EXPORT_FINAL_VIDEO,
-    "Cut-aware Shotcut MLT (ZIP)": EXPORT_CUT_AWARE_MLT,
-    "Clip Shotcut MLT (ZIP)": EXPORT_CLIP_MLT,
+    "Shotcut: Full Timeline (ZIP)": EXPORT_CUT_AWARE_MLT,
+    "Shotcut: Source Clips (ZIP)": EXPORT_CLIP_MLT,
 }
 
 OUTPUT_RESOLUTION_LABELS = {
@@ -2653,7 +2653,8 @@ class GlitchGUI:
         ttk.Entry(io, textvariable=self.audio).grid(row=2, column=1, sticky="ew")
         ttk.Button(io, text="...", command=self.add_a).grid(row=2, column=2)
         ttk.Label(io, text="Export:").grid(row=3, column=0)
-        ttk.Combobox(io, textvariable=self.export_mode_label, values=list(EXPORT_MODE_LABELS.keys()), state="readonly").grid(row=3, column=1, sticky="ew")
+        export_mode_combo = ttk.Combobox(io, textvariable=self.export_mode_label, values=list(EXPORT_MODE_LABELS.keys()), state="readonly")
+        export_mode_combo.grid(row=3, column=1, sticky="ew")
         ttk.Label(io, text="Resolution:").grid(row=4, column=0)
         ttk.Combobox(io, textvariable=self.output_resolution_label, values=list(OUTPUT_RESOLUTION_LABELS.keys()), state="readonly").grid(row=4, column=1, sticky="ew")
         ttk.Label(io, text="Quality:").grid(row=5, column=0)
@@ -2695,6 +2696,7 @@ class GlitchGUI:
         self.add_tooltip(seed_copy_button, "Copy the current seed to the clipboard.")
         self.add_tooltip(seed_randomize_button, "Fill the seed field with a new random value.")
         self.add_tooltip(use_last_seed_button, "Restore the seed from the most recent render in this session.")
+        self.add_tooltip(export_mode_combo, "Full Timeline bakes GlitchSync effects and transitions into rendered segment clips for a multi-track Shotcut project. Source Clips keeps the project editable from original clips, but does not include the full rendered transition look.")
         self.render_seed.trace_add("write", lambda *_: self.update_render_seed_status())
         self.update_render_seed_status()
 
