@@ -2807,7 +2807,7 @@ class GlitchGUI:
         self.add_tooltip(load_style_label, "Choose a saved style to restore a preset configuration.")
         self.add_tooltip(self.style_combo, "Select a built-in or saved style.")
 
-        fx = ttk.LabelFrame(right_top, text="Effects", padding="10"); fx.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        fx = ttk.LabelFrame(m, text="Effects", padding="10"); fx.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
         fx.columnconfigure(1, weight=1)
         ttk.Label(fx, text="Amount").grid(row=0, column=1, sticky="w", padx=5)
         ttk.Label(fx, text="Timing").grid(row=0, column=3, sticky="w", padx=(8, 0))
