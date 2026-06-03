@@ -2615,7 +2615,7 @@ class GlitchGUI:
         self.update_render_seed_status()
 
         pv = ttk.LabelFrame(m, text="Live Preview & Review", padding="8"); pv.grid(row=0, column=1, sticky="nsew", padx=5, pady=(5, 3))
-        self.cv = tk.Canvas(pv, width=480, height=220, bg="black"); self.cv.pack(pady=(2, 4), fill=tk.X)
+        self.cv = tk.Canvas(pv, width=480, height=160, bg="black"); self.cv.pack(pady=(2, 4), fill=tk.X)
         self.rv_btn = ttk.Button(pv, text="REVIEW WITH AUDIO", command=self.review_render, state=tk.DISABLED); self.rv_btn.pack(fill=tk.X)
         ttk.Label(pv, text="Click REVIEW to watch with full audio sync.", wraplength=430, justify=tk.CENTER).pack(pady=(4, 2))
         resource_f = ttk.LabelFrame(m, text="System Resources", padding="6")
@@ -3581,13 +3581,17 @@ class GlitchGUI:
     def _render_finished_ui(self):
         self.pg.stop(); self.pg.config(mode='determinate'); self.btn.config(state=tk.NORMAL); self.stop_btn.config(state=tk.DISABLED); self.pg['value'] = 0
     def display_frame(self, f):
-        h, w = f.shape[:2]; s = min(480/w, 270/h); nw, nh = int(w*s), int(h*s)
+        h, w = f.shape[:2]
+        canvas_w = max(1, int(self.cv.winfo_width() or self.cv.winfo_reqwidth() or 480))
+        canvas_h = max(1, int(self.cv.winfo_height() or self.cv.winfo_reqheight() or 160))
+        s = min(canvas_w / max(w, 1), canvas_h / max(h, 1))
+        nw, nh = max(1, int(w * s)), max(1, int(h * s))
         img = Image.fromarray(cv2.cvtColor(f, cv2.COLOR_BGR2RGB)).resize((nw, nh), Image.LANCZOS)
         img_tk = ImageTk.PhotoImage(image=img)
         self.root.after(0, self._update_cv, img_tk)
     def _update_cv(self, img_tk):
         self.cv.delete("all")
-        self.cv.create_image(240, 135, anchor=tk.CENTER, image=img_tk); self.cv._img_ref = img_tk
+        self.cv.create_image(self.cv.winfo_width() // 2, self.cv.winfo_height() // 2, anchor=tk.CENTER, image=img_tk); self.cv._img_ref = img_tk
     def review_render(self):
         path = self.last_render_output_path or self.resolve_render_output(EXPORT_MODE_LABELS[self.export_mode_label.get()])
         self.log_msg(f"Launching ffplay: {path}")
