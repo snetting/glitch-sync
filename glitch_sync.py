@@ -367,9 +367,9 @@ def resolve_scene_transition_mode(mode, current_activity, next_activity):
     delta = abs(next_activity - current_activity)
     if drive >= SCENE_TRANSITION_AUTO_HARD_ACTIVITY or delta >= SCENE_TRANSITION_AUTO_HARD_DELTA:
         return "Hard cut"
-    if drive >= SCENE_TRANSITION_AUTO_FAST_ACTIVITY or delta >= SCENE_TRANSITION_AUTO_FAST_DELTA:
+    if drive <= SCENE_TRANSITION_AUTO_FAST_ACTIVITY and delta <= SCENE_TRANSITION_AUTO_FAST_DELTA:
         return "Fast fade"
-    return "Slow fade"
+    return "Hard cut"
 
 
 def scene_transition_fade_frames(mode, fps, current_frames, next_frames=None):
@@ -1607,26 +1607,104 @@ class GlitchProcessor:
                 1,
             )
             segment_profiles.append(profile)
+        saved_log = self.log
+        saved_random_state = random.getstate()
+        saved_np_state = np.random.get_state()
+        saved_current_vid_idx = self.current_vid_idx
+        saved_recent_matches = {
+            idx: deque(history, maxlen=history.maxlen)
+            for idx, history in self.recent_matches.items()
+        }
+        saved_source_lock_penalties = list(self.source_lock_penalties)
+        planned_segments = []
+        match_quality_total = 0.0
+        match_brightness_total = 0.0
+        match_activity_total = 0.0
+        match_segments = 0
+        try:
+            self.log = lambda *args, **kwargs: None
+            planning_vid_idx = self.current_vid_idx
+            planning_source_use_counts = [0 for _ in self.inputs]
+            planning_source_streak = 0
+            for i, profile in enumerate(segment_profiles):
+                t_start = profile["t_start"]
+                num_frames = profile["num_frames"]
+                clip_rms = profile["clip_rms"]
+                target_brightness = profile["target_brightness"]
+                target_brightness_norm = profile["target_brightness_norm"]
+                target_activity = profile["target_activity"]
+                self.decay_source_lock_penalties()
+                match = self.find_best_match(
+                    target_brightness,
+                    frame_db,
+                    planning_vid_idx,
+                    planning_source_use_counts,
+                    activity_db,
+                    target_activity,
+                    num_frames,
+                    activity_scale,
+                    planning_source_streak,
+                )
+                if not match:
+                    continue
+                previous_vid_idx = planning_vid_idx
+                planning_vid_idx, start_frame = match
+                planning_source_streak = planning_source_streak + 1 if planning_vid_idx == previous_vid_idx else 1
+                self.record_match(planning_vid_idx, start_frame)
+                planning_source_use_counts[planning_vid_idx] += 1
+                selected_brightness = self.segment_motion_score(brightness_db, planning_vid_idx, start_frame, num_frames)
+                selected_activity = self.segment_motion_score(activity_db, planning_vid_idx, start_frame, num_frames)
+                brightness_error = abs(selected_brightness - target_brightness_norm)
+                activity_error = abs(selected_activity - target_activity)
+                segment_quality = float(np.clip(1.0 - ((brightness_error + activity_error) * 0.5), 0, 1))
+                match_quality_total += segment_quality
+                match_brightness_total += float(np.clip(1.0 - brightness_error, 0, 1))
+                match_activity_total += float(np.clip(1.0 - activity_error, 0, 1))
+                match_segments += 1
+                planned_segments.append({
+                    "index": i,
+                    "profile": profile,
+                    "video_idx": planning_vid_idx,
+                    "start_frame": start_frame,
+                    "num_frames": num_frames,
+                    "target_brightness_norm": target_brightness_norm,
+                    "target_activity": target_activity,
+                    "selected_brightness": selected_brightness,
+                    "selected_activity": selected_activity,
+                    "segment_quality": segment_quality,
+                    "clip_rms": clip_rms,
+                    "source_path": self.inputs[planning_vid_idx],
+                })
+        finally:
+            self.log = saved_log
+            random.setstate(saved_random_state)
+            np.random.set_state(saved_np_state)
+            self.current_vid_idx = saved_current_vid_idx
+            self.recent_matches = saved_recent_matches
+            self.source_lock_penalties = saved_source_lock_penalties
+
         transition_boundaries = []
-        for i in range(max(0, len(segment_profiles) - 1)):
-            current = segment_profiles[i]
-            next_profile = segment_profiles[i + 1]
-            transition_mode = resolve_scene_transition_mode(
+        for i in range(max(0, len(planned_segments) - 1)):
+            current = planned_segments[i]
+            next_segment = planned_segments[i + 1]
+            same_source = current["source_path"] == next_segment["source_path"]
+            transition_mode = "Hard cut" if same_source else resolve_scene_transition_mode(
                 self.scene_transition_mode,
                 current["target_activity"],
-                next_profile["target_activity"],
+                next_segment["target_activity"],
             )
-            transition_frames = scene_transition_fade_frames(
+            transition_frames = 0 if transition_mode == "Hard cut" else scene_transition_fade_frames(
                 transition_mode,
                 self.fps,
                 current["num_frames"],
-                next_profile["num_frames"],
+                next_segment["num_frames"],
             )
             transition_boundaries.append({
                 "mode": transition_mode,
                 "frames": transition_frames,
                 "current_activity": current["target_activity"],
-                "next_activity": next_profile["target_activity"],
+                "next_activity": next_segment["target_activity"],
+                "same_source": same_source,
             })
 
         cap = cv2.VideoCapture(self.inputs[0])
@@ -1641,17 +1719,10 @@ class GlitchProcessor:
         temp_video = f"temp_{random.randint(1000, 9999)}.avi"
         out = cv2.VideoWriter(temp_video, cv2.VideoWriter_fourcc(*'XVID'), self.fps, (width, height))
         caps, prev_f = [cv2.VideoCapture(f) for f in self.inputs], None
-        source_use_counts = [0 for _ in self.inputs]
         reference_stats = color_stats.get(self.color_reference_idx) if self.color_reference_idx is not None else None
-        motion_scale = self.motion_scale(motion_db)
         activity_scale = self.motion_scale(activity_db)
         segments = []
         rendered_frames = 0
-        source_streak = 0
-        match_quality_total = 0.0
-        match_brightness_total = 0.0
-        match_activity_total = 0.0
-        match_segments = 0
         if self.export_mode == EXPORT_CLIP_MLT:
             package_dir = tempfile.mkdtemp(prefix="glitchsync_shotcut_")
             clip_dir = os.path.join(package_dir, "media", "clips")
@@ -1670,77 +1741,55 @@ class GlitchProcessor:
             self.log(f"  Scene transitions: {self.scene_transition_mode}")
         if reference_stats and self.color_match_strength > 0:
             self.log(f"  Color reference: {os.path.basename(self.inputs[self.color_reference_idx])} ({self.color_match_strength:.2f})")
-        for i in range(len(cut_times)):
+        if not planned_segments:
+            self.log("  No segment matches were selected.")
+        for i, plan in enumerate(planned_segments):
             if self.stop_requested: break
-            profile = segment_profiles[i]
+            profile = plan["profile"]
             t_start = profile["t_start"]
             dur = profile["dur"]
-            num_frames = profile["num_frames"]
+            num_frames = plan["num_frames"]
             curr_rms = profile["curr_rms"]
-            clip_rms = profile["clip_rms"]
+            clip_rms = plan["clip_rms"]
             clip_bass = profile["clip_bass"]
             clip_highs = profile["clip_highs"]
             clip_mids = profile["clip_mids"]
             target_brightness = profile["target_brightness"]
-            target_brightness_norm = profile["target_brightness_norm"]
-            target_activity = profile["target_activity"]
-            self.decay_source_lock_penalties()
+            target_brightness_norm = plan["target_brightness_norm"]
+            target_activity = plan["target_activity"]
+            current_vid_idx = plan["video_idx"]
+            start_frame = plan["start_frame"]
+            self.current_vid_idx = current_vid_idx
             ai_segment_probability = self.ai_segment_probability(clip_rms)
             if self.debug_match_logging:
                 self.log(
-                    f"  Debug AI: segment {i + 1}/{len(cut_times)} clip_rms={clip_rms:.2f} "
+                    f"  Debug AI: segment {i + 1}/{len(planned_segments)} clip_rms={clip_rms:.2f} "
                     f"prob={ai_segment_probability:.2f}"
                 )
-            
-            match = self.find_best_match(
-                target_brightness,
-                frame_db,
-                self.current_vid_idx,
-                source_use_counts,
-                activity_db,
-                target_activity,
-                num_frames,
-                activity_scale,
-                source_streak,
-            )
-            if match:
-                previous_vid_idx = self.current_vid_idx
-                self.current_vid_idx, start_frame = match
-                source_streak = source_streak + 1 if self.current_vid_idx == previous_vid_idx else 1
-                self.record_match(self.current_vid_idx, start_frame)
-                source_use_counts[self.current_vid_idx] += 1
-                caps[self.current_vid_idx].set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-                chunk = []
-                for _ in range(num_frames):
-                    r, f = caps[self.current_vid_idx].read()
-                    if r: chunk.append(f)
-                rewind_amount = self.effect_amount("rewind")
-                if self.rewind and clip_rms > 0.75 and random.random() < min(1.0, rewind_amount):
-                    chunk = chunk[::-1]
+            caps[current_vid_idx].set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+            chunk = []
+            for _ in range(num_frames):
+                r, f = caps[current_vid_idx].read()
+                if r:
+                    chunk.append(f)
+            rewind_amount = self.effect_amount("rewind")
+            if self.rewind and clip_rms > 0.75 and random.random() < min(1.0, rewind_amount):
+                chunk = chunk[::-1]
 
-                selected_brightness = self.segment_motion_score(brightness_db, self.current_vid_idx, start_frame, len(chunk))
-                selected_activity = self.segment_motion_score(activity_db, self.current_vid_idx, start_frame, len(chunk))
-                brightness_error = abs(selected_brightness - target_brightness_norm)
-                activity_error = abs(selected_activity - target_activity)
-                segment_quality = float(np.clip(1.0 - ((brightness_error + activity_error) * 0.5), 0, 1))
-                match_quality_total += segment_quality
-                match_brightness_total += float(np.clip(1.0 - brightness_error, 0, 1))
-                match_activity_total += float(np.clip(1.0 - activity_error, 0, 1))
-                match_segments += 1
-                if self.verbose_match_logging:
-                    self.log(
-                        f"  Match {i + 1}/{len(cut_times)}: quality {segment_quality:.2f} "
-                        f"(brightness {selected_brightness:.2f}/{target_brightness_norm:.2f}, "
-                        f"activity {selected_activity:.2f}/{target_activity:.2f})"
-                    )
-                transition_in = transition_boundaries[i - 1] if i > 0 and i - 1 < len(transition_boundaries) else None
-                transition_out = transition_boundaries[i] if i < len(transition_boundaries) else None
-                if self.debug_match_logging and transition_out:
-                    self.log(
-                        f"  Debug transition {i + 1}->{i + 2}: {transition_out['mode'].lower()} "
-                        f"({transition_out['current_activity']:.2f} -> {transition_out['next_activity']:.2f}, "
-                        f"{transition_out['frames']} frames)"
-                    )
+            if self.verbose_match_logging:
+                self.log(
+                    f"  Match {i + 1}/{len(planned_segments)}: quality {plan['segment_quality']:.2f} "
+                    f"(brightness {plan['selected_brightness']:.2f}/{target_brightness_norm:.2f}, "
+                    f"activity {plan['selected_activity']:.2f}/{target_activity:.2f})"
+                )
+            transition_in = transition_boundaries[i - 1] if i > 0 and i - 1 < len(transition_boundaries) else None
+            transition_out = transition_boundaries[i] if i < len(transition_boundaries) else None
+            if self.debug_match_logging and transition_out:
+                self.log(
+                    f"  Debug transition {i + 1}->{i + 2}: {transition_out['mode'].lower()} "
+                    f"({transition_out['current_activity']:.2f} -> {transition_out['next_activity']:.2f}, "
+                    f"{transition_out['frames']} frames)"
+                )
 
                 pixelate_amount = self.effect_amount("pixelate")
                 flash_amount = self.effect_amount("flash")
@@ -1841,7 +1890,7 @@ class GlitchProcessor:
                             if ai_anchor is None:
                                 ai_anchor, ai_ok = self.ai_render_frame(f)
                                 if ai_ok:
-                                    self.log(f"  AI anchor generated for segment {i + 1}/{len(cut_times)}")
+                                    self.log(f"  AI anchor generated for segment {i + 1}/{len(planned_segments)}")
                                 else:
                                     ai_anchor = None
                         else:
@@ -1854,7 +1903,7 @@ class GlitchProcessor:
                                 ai_anchor, ai_ok = self.ai_render_frame(f)
                                 if ai_ok:
                                     ai_anchor_frame_idx = frame_idx
-                                    self.log(f"  AI frame refreshed at segment {i + 1}/{len(cut_times)} frame {frame_idx + 1}/{len(chunk)}")
+                                    self.log(f"  AI frame refreshed at segment {i + 1}/{len(planned_segments)} frame {frame_idx + 1}/{len(chunk)}")
                                 else:
                                     ai_anchor = None
                         if ai_anchor is not None and self.ai_blend > 0:
@@ -1882,36 +1931,38 @@ class GlitchProcessor:
                         segment_frames.append(f)
                     prev_f = f.copy()
 
-                if chunk and not self.stop_requested:
-                    frame_count = len(segment_frames) if self.export_mode == EXPORT_CLIP_MLT else len(chunk)
-                    segment = {
-                        "timeline_in": rendered_frames,
-                        "timeline_out": rendered_frames + frame_count - 1,
-                        "frame_count": frame_count,
-                        "transition_in": transition_in,
-                        "transition_out": transition_out,
-                    }
-                    if self.export_mode == EXPORT_CUT_AWARE_MLT:
-                        segment["producer"] = "video0"
-                        segment["in"] = rendered_frames
-                        segment["out"] = rendered_frames + frame_count - 1
-                    elif self.export_mode == EXPORT_CLIP_MLT:
-                        clip_name = f"clip_{len(segments) + 1:04d}.avi"
-                        clip_path = os.path.join(clip_dir, clip_name)
-                        clip_out = cv2.VideoWriter(clip_path, cv2.VideoWriter_fourcc(*'XVID'), self.fps, (width, height))
-                        for frame in segment_frames:
-                            clip_out.write(frame)
-                        clip_out.release()
-                        segment["producer"] = f"video{len(segments)}"
-                        segment["resource"] = f"media/clips/{clip_name}"
-                        segment["in"] = 0
-                        segment["out"] = frame_count - 1
-                    segments.append(segment)
-                    rendered_frames += frame_count
+            if chunk and not self.stop_requested:
+                frame_count = len(segment_frames) if self.export_mode == EXPORT_CLIP_MLT else len(chunk)
+                segment = {
+                    "timeline_in": rendered_frames,
+                    "timeline_out": rendered_frames + frame_count - 1,
+                    "frame_count": frame_count,
+                    "transition_in": transition_in,
+                    "transition_out": transition_out,
+                }
+                if self.export_mode == EXPORT_CUT_AWARE_MLT:
+                    segment["producer"] = "video0"
+                    segment["in"] = rendered_frames
+                    segment["out"] = rendered_frames + frame_count - 1
+                elif self.export_mode == EXPORT_CLIP_MLT:
+                    clip_name = f"clip_{len(segments) + 1:04d}.avi"
+                    clip_path = os.path.join(clip_dir, clip_name)
+                    clip_out = cv2.VideoWriter(clip_path, cv2.VideoWriter_fourcc(*'XVID'), self.fps, (width, height))
+                    for frame in segment_frames:
+                        clip_out.write(frame)
+                    clip_out.release()
+                    segment["producer"] = f"video{len(segments)}"
+                    segment["resource"] = f"media/clips/{clip_name}"
+                    segment["in"] = 0
+                    segment["out"] = frame_count - 1
+                segments.append(segment)
+                rendered_frames += frame_count
 
-                if self.frame_callback and chunk: self.frame_callback(chunk[0])
+            if self.frame_callback and chunk:
+                self.frame_callback(chunk[0])
 
-            if self.progress_callback: self.progress_callback(i, len(cut_times))
+            if self.progress_callback:
+                self.progress_callback(i, len(planned_segments))
             
         for c in caps: c.release()
         out.release()
@@ -2226,8 +2277,10 @@ class GlitchGUI:
         ttk.Combobox(io, textvariable=self.output_resolution_label, values=list(OUTPUT_RESOLUTION_LABELS.keys()), state="readonly").grid(row=4, column=1, sticky="ew")
         ttk.Label(io, text="Out:").grid(row=5, column=0)
         ttk.Entry(io, textvariable=self.output).grid(row=5, column=1, sticky="ew")
-        ttk.Label(io, text="Seed:").grid(row=6, column=0, sticky="w")
-        seed_controls = ttk.Frame(io); seed_controls.grid(row=6, column=1, sticky="ew", pady=5)
+        output_name_mode = ttk.Checkbutton(io, text="Increment if exists", variable=self.increment_output_if_exists)
+        output_name_mode.grid(row=6, column=1, sticky="w")
+        ttk.Label(io, text="Seed:").grid(row=7, column=0, sticky="w")
+        seed_controls = ttk.Frame(io); seed_controls.grid(row=7, column=1, sticky="ew", pady=5)
         seed_controls.columnconfigure(0, weight=1)
         render_seed_entry = ttk.Entry(seed_controls, textvariable=self.render_seed)
         render_seed_entry.grid(row=0, column=0, sticky="ew")
@@ -2239,8 +2292,6 @@ class GlitchGUI:
         use_last_seed_button.grid(row=0, column=3, padx=(5, 0))
         self.render_seed_status_label = ttk.Label(seed_controls, text="Auto", width=5)
         self.render_seed_status_label.grid(row=0, column=4, padx=(8, 0))
-        output_name_mode = ttk.Checkbutton(io, text="Increment if exists", variable=self.increment_output_if_exists)
-        output_name_mode.grid(row=7, column=1, sticky="w")
         ttk.Label(io, text="Render length:").grid(row=8, column=0, sticky="w")
         render_length_controls = ttk.Frame(io); render_length_controls.grid(row=8, column=1, sticky="w", pady=5)
         ttk.Combobox(render_length_controls, textvariable=self.render_mode, values=["Full", "Snippet"], state="readonly", width=10).pack(side=tk.LEFT)
