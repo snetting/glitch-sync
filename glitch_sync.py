@@ -1074,12 +1074,17 @@ class GlitchProcessor:
             if penalty > 0:
                 self.source_lock_penalties[idx] = max(0.0, penalty * SOURCE_LOCK_PENALTY_DECAY)
 
-    def penalize_source_lock(self, source_idx, source_streak):
+    def penalize_source_lock(self, source_idx, source_streak, alternate_count=0, current_count=0):
         if source_idx is None or not (0 <= source_idx < len(self.source_lock_penalties)):
             return
+        alt_count = max(0, int(alternate_count))
+        total_candidates = max(1, alt_count + max(0, int(current_count)))
+        alt_volume = np.clip(alt_count / 16.0, 0, 1)
+        alt_fraction = np.clip(alt_count / total_candidates, 0, 1)
+        penalty_scale = 0.5 + (1.0 * alt_volume) + (0.5 * alt_fraction)
         penalty = min(
             SOURCE_LOCK_PENALTY_MAX,
-            SOURCE_LOCK_PENALTY_START + max(0, source_streak - SOURCE_LOCK_TRIGGER_STREAK) * 0.75,
+            (SOURCE_LOCK_PENALTY_START + max(0, source_streak - SOURCE_LOCK_TRIGGER_STREAK) * 0.75) * penalty_scale,
         )
         self.source_lock_penalties[source_idx] = max(self.source_lock_penalties[source_idx], penalty)
 
@@ -1327,7 +1332,7 @@ class GlitchProcessor:
         if candidates_primary and random.random() < self.primary_focus:
             return self.choose_candidate(candidates_primary, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
         if source_streak >= SOURCE_LOCK_TRIGGER_STREAK and candidates_other:
-            self.penalize_source_lock(current_vid_idx, source_streak)
+            self.penalize_source_lock(current_vid_idx, source_streak, len(candidates_other), len(candidates_current))
             self.log(
                 f"  Source lock detected after {source_streak} same-source segments; "
                 f"forcing an alternate source near brightness {target_b} "
@@ -1335,7 +1340,7 @@ class GlitchProcessor:
             )
             return self.choose_candidate(candidates_other, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
         if source_streak >= SOURCE_LOCK_TRIGGER_STREAK and candidates_current and not candidates_other:
-            self.penalize_source_lock(current_vid_idx, source_streak)
+            self.penalize_source_lock(current_vid_idx, source_streak, 0, len(candidates_current))
             self.log(
                 f"  Source lock detected after {source_streak} same-source segments; "
                 f"no alternate candidates exist near brightness {target_b} "
