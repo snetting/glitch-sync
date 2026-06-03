@@ -2331,9 +2331,9 @@ class GlitchGUI:
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
         initial_w = min(1180, max(1100, screen_w - 60))
-        initial_h = min(1360, max(980, screen_h - 120))
+        initial_h = min(1500, max(1040, screen_h - 40))
         self.root.geometry(f"{initial_w}x{initial_h}")
-        self.root.minsize(1100, 980)
+        self.root.minsize(1100, 1040)
         self.inputs, self.audio = [], tk.StringVar()
         self.output = tk.StringVar(value=f"glitch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
         self.output_auto_managed = True
@@ -2881,9 +2881,9 @@ class GlitchGUI:
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
         base_width = 1180
-        base_height = 1180 if not self.experimental_mode.get() else 1360
+        base_height = 1280 if not self.experimental_mode.get() else 1500
         width = min(base_width, max(1100, screen_w - 60))
-        height = min(base_height, max(980, screen_h - 120))
+        height = min(base_height, max(1040, screen_h - 40))
         self.root.geometry(f"{width}x{height}")
     def add_effect_control(self, parent, row, label, enabled_var, amount_name, max_value=2.0, amount_var=None, timing_var=None, timing_values=None, show_check=True):
         amount_var = amount_var or self.effect_amounts[amount_name]
