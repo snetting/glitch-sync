@@ -2568,14 +2568,17 @@ class GlitchGUI:
         ttk.Combobox(io, textvariable=self.export_mode_label, values=list(EXPORT_MODE_LABELS.keys()), state="readonly").grid(row=2, column=1, sticky="ew")
         ttk.Label(io, text="Quality:").grid(row=3, column=0)
         ttk.Combobox(io, textvariable=self.export_quality_label, values=list(EXPORT_QUALITY_LABELS.keys()), state="readonly").grid(row=3, column=1, sticky="ew")
-        ttk.Label(io, text="Resolution:").grid(row=4, column=0)
-        ttk.Combobox(io, textvariable=self.output_resolution_label, values=list(OUTPUT_RESOLUTION_LABELS.keys()), state="readonly").grid(row=4, column=1, sticky="ew")
-        ttk.Label(io, text="Out:").grid(row=5, column=0)
-        ttk.Entry(io, textvariable=self.output).grid(row=5, column=1, sticky="ew")
+        ttk.Label(io, text="Render length:").grid(row=5, column=0, sticky="w")
+        render_length_controls = ttk.Frame(io); render_length_controls.grid(row=5, column=1, sticky="w", pady=5)
+        ttk.Combobox(render_length_controls, textvariable=self.render_mode, values=["Full", "Snippet"], state="readonly", width=10).pack(side=tk.LEFT)
+        ttk.Spinbox(render_length_controls, from_=1, to=3600, textvariable=self.snippet_duration, width=7).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(render_length_controls, text="sec").pack(side=tk.LEFT, padx=(4, 0))
+        ttk.Label(io, text="Out:").grid(row=6, column=0)
+        ttk.Entry(io, textvariable=self.output).grid(row=6, column=1, sticky="ew")
         output_name_mode = ttk.Checkbutton(io, text="Increment if exists", variable=self.increment_output_if_exists)
-        output_name_mode.grid(row=6, column=1, sticky="w")
-        ttk.Label(io, text="Seed:").grid(row=7, column=0, sticky="w")
-        seed_controls = ttk.Frame(io); seed_controls.grid(row=7, column=1, sticky="ew", pady=5)
+        output_name_mode.grid(row=7, column=1, sticky="w")
+        ttk.Label(io, text="Seed:").grid(row=8, column=0, sticky="w")
+        seed_controls = ttk.Frame(io); seed_controls.grid(row=8, column=1, sticky="ew", pady=5)
         seed_controls.columnconfigure(0, weight=1)
         render_seed_entry = ttk.Entry(seed_controls, textvariable=self.render_seed)
         render_seed_entry.grid(row=0, column=0, sticky="ew")
@@ -2587,11 +2590,6 @@ class GlitchGUI:
         use_last_seed_button.grid(row=0, column=3, padx=(5, 0))
         self.render_seed_status_label = ttk.Label(seed_controls, text="Auto", width=5)
         self.render_seed_status_label.grid(row=0, column=4, padx=(8, 0))
-        ttk.Label(io, text="Render length:").grid(row=8, column=0, sticky="w")
-        render_length_controls = ttk.Frame(io); render_length_controls.grid(row=8, column=1, sticky="w", pady=5)
-        ttk.Combobox(render_length_controls, textvariable=self.render_mode, values=["Full", "Snippet"], state="readonly", width=10).pack(side=tk.LEFT)
-        ttk.Spinbox(render_length_controls, from_=1, to=3600, textvariable=self.snippet_duration, width=7).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Label(render_length_controls, text="sec").pack(side=tk.LEFT, padx=(4, 0))
         ttk.Checkbutton(io, text="Primary focus", variable=self.primary_enabled).grid(row=9, column=0, sticky="w")
         primary_controls = ttk.Frame(io); primary_controls.grid(row=9, column=1, sticky="w", pady=5)
         ttk.Button(primary_controls, text="Set Selected", command=self.set_primary_video).pack(side=tk.LEFT)
@@ -2634,7 +2632,7 @@ class GlitchGUI:
         self.rv_btn = ttk.Button(pv, text="REVIEW WITH AUDIO", command=self.review_render, state=tk.DISABLED); self.rv_btn.pack(fill=tk.X)
         ttk.Label(pv, text="Click REVIEW to watch with full audio sync.", wraplength=430, justify=tk.CENTER).pack(pady=(4, 2))
         resource_f = ttk.LabelFrame(right_top, text="System Resources", padding="6")
-        resource_f.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        resource_f.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         resource_f.columnconfigure(1, weight=1)
         self.resource_cpu_label = ttk.Label(resource_f, text="CPU:")
         self.resource_cpu_label.grid(row=0, column=0, sticky="w")
@@ -2781,6 +2779,7 @@ class GlitchGUI:
         self.update_ai_cfg_scale_label()
         self.update_ai_blend_label()
         self.toggle_experimental_mode()
+        self.adjust_window_for_mode()
 
         self.add_tooltip(beat_sync_cb, "Enable beat detection so clip boundaries follow the music.")
         self.add_tooltip(output_name_mode, "When enabled, existing output files are preserved and a numeric suffix is added.")
@@ -2871,6 +2870,18 @@ class GlitchGUI:
             self.ai_frame.grid_remove()
             for widget in getattr(self, "ai_dream_row_widgets", ()):
                 widget.grid_remove()
+        self.adjust_window_for_mode()
+    def adjust_window_for_mode(self):
+        if not hasattr(self, "root"):
+            return
+        self.root.update_idletasks()
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        base_width = 1180
+        base_height = 1180 if not self.experimental_mode.get() else 1360
+        width = min(base_width, max(1100, screen_w - 60))
+        height = min(base_height, max(980, screen_h - 120))
+        self.root.geometry(f"{width}x{height}")
     def add_effect_control(self, parent, row, label, enabled_var, amount_name, max_value=2.0, amount_var=None, timing_var=None, timing_values=None, show_check=True):
         amount_var = amount_var or self.effect_amounts[amount_name]
         timing_var = timing_var or self.effect_timing[amount_name]
