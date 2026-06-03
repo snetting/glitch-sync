@@ -1612,7 +1612,7 @@ class GlitchProcessor:
             current = segment_profiles[i]
             next_profile = segment_profiles[i + 1]
             transition_mode = resolve_scene_transition_mode(
-                self.scene_transition_mode.get(),
+                self.scene_transition_mode,
                 current["target_activity"],
                 next_profile["target_activity"],
             )
@@ -1664,10 +1664,10 @@ class GlitchProcessor:
             self.log(f"  Source variety: {self.source_variety:.2f}")
         if self.music_match > 0:
             self.log(f"  Music match: {self.music_match:.2f}")
-        if self.scene_transition_mode.get() == "Auto":
+        if self.scene_transition_mode == "Auto":
             self.log("  Scene transitions: Auto (activity-driven cuts/fades)")
         else:
-            self.log(f"  Scene transitions: {self.scene_transition_mode.get()}")
+            self.log(f"  Scene transitions: {self.scene_transition_mode}")
         if reference_stats and self.color_match_strength > 0:
             self.log(f"  Color reference: {os.path.basename(self.inputs[self.color_reference_idx])} ({self.color_match_strength:.2f})")
         for i in range(len(cut_times)):
