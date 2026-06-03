@@ -1399,24 +1399,44 @@ class GlitchProcessor:
         if candidates_other:
             return self.choose_candidate(candidates_other, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
         offset = 1
+        first_fallback = None
         while offset < 256:
             low, high = target_b - offset, target_b + offset
             fallback = []
             primary_fallback = []
             if low >= 0: fallback.extend(frame_db[low])
             if high <= 255: fallback.extend(frame_db[high])
+            if fallback and first_fallback is None:
+                first_fallback = list(fallback)
             if self.use_primary_video():
                 primary_fallback = [item for item in fallback if item[0] == self.primary_video_idx]
                 if primary_fallback and random.random() < self.primary_focus:
                     return self.choose_candidate(primary_fallback, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
             if fallback:
+                fallback_sources = {v_idx for v_idx, _ in fallback}
+                if source_streak >= SOURCE_LOCK_TRIGGER_STREAK and len(fallback_sources) < 2:
+                    if self.debug_match_logging:
+                        self.log(
+                            f"  Debug fallback skip: offset={offset} candidates={len(fallback)} "
+                            f"sources={len(fallback_sources)}"
+                        )
+                    offset += 1
+                    continue
                 if self.debug_match_logging:
                     self.log(
                         f"  Debug fallback: offset={offset} candidates={len(fallback)} "
-                        f"primary={len(primary_fallback)}"
+                        f"primary={len(primary_fallback)} sources={len(fallback_sources)}"
                     )
                 return self.choose_candidate(fallback, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
             offset += 1
+        if first_fallback:
+            if self.debug_match_logging:
+                fallback_sources = {v_idx for v_idx, _ in first_fallback}
+                self.log(
+                    f"  Debug fallback last-resort: candidates={len(first_fallback)} "
+                    f"sources={len(fallback_sources)}"
+                )
+            return self.choose_candidate(first_fallback, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
         return None
 
     def segment_motion_score(self, motion_db, video_idx, start_frame, frame_count):
