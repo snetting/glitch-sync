@@ -2723,14 +2723,20 @@ class GlitchGUI:
         self.resource_ram_bar.grid(row=1, column=1, sticky="ew", padx=(8, 8))
         self.resource_ram_value = ttk.Label(resource_f, text="0.0%", width=18)
         self.resource_ram_value.grid(row=1, column=2, sticky="e")
-        self.resource_temp_label = ttk.Label(resource_f, text="Temp:")
-        self.resource_temp_label.grid(row=2, column=0, sticky="w")
+        self.resource_gpu_label = ttk.Label(resource_f, text="GPU:")
+        self.resource_gpu_label.grid(row=2, column=0, sticky="w")
+        self.resource_gpu_bar = ttk.Progressbar(resource_f, orient=tk.HORIZONTAL, mode="determinate", maximum=100)
+        self.resource_gpu_bar.grid(row=2, column=1, sticky="ew", padx=(8, 8))
+        self.resource_gpu_value = ttk.Label(resource_f, text="0.0%", width=18)
+        self.resource_gpu_value.grid(row=2, column=2, sticky="e")
+        self.resource_temp_label = ttk.Label(resource_f, text="Disk:")
+        self.resource_temp_label.grid(row=3, column=0, sticky="w")
         self.resource_temp_bar = ttk.Progressbar(resource_f, orient=tk.HORIZONTAL, mode="determinate", maximum=100)
-        self.resource_temp_bar.grid(row=2, column=1, sticky="ew", padx=(8, 8))
+        self.resource_temp_bar.grid(row=3, column=1, sticky="ew", padx=(8, 8))
         self.resource_temp_value = ttk.Label(resource_f, text="0.0%", width=18)
-        self.resource_temp_value.grid(row=2, column=2, sticky="e")
+        self.resource_temp_value.grid(row=3, column=2, sticky="e")
         self.resource_temp_type = ttk.Label(resource_f, text="")
-        self.resource_temp_type.grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self.resource_temp_type.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
         self.temp_storage_root = preferred_temp_root() or tempfile.gettempdir()
         self.init_resource_monitor()
 
@@ -3012,6 +3018,31 @@ class GlitchGUI:
     def update_render_seed_status(self):
         if self.render_seed_status_label:
             self.render_seed_status_label.config(text="Auto" if not self.render_seed.get().strip() else "Fixed")
+    def probe_gpu_usage(self):
+        if shutil.which("nvidia-smi") is None:
+            return None
+        try:
+            result = subprocess.run([
+                "nvidia-smi",
+                "--query-gpu=utilization.gpu",
+                "--format=csv,noheader,nounits",
+            ], capture_output=True, text=True, timeout=1.5)
+            if result.returncode != 0:
+                return None
+            values = []
+            for line in result.stdout.splitlines():
+                line = line.strip().rstrip("%")
+                if not line:
+                    continue
+                try:
+                    values.append(float(line))
+                except ValueError:
+                    continue
+            if not values:
+                return None
+            return sum(values) / len(values)
+        except Exception:
+            return None
     def init_resource_monitor(self):
         self.temp_storage_root = preferred_temp_root() or tempfile.gettempdir()
         if hasattr(psutil, "cpu_percent"):
@@ -3029,6 +3060,10 @@ class GlitchGUI:
                 self.resource_ram_bar["value"] = 0
             if self.resource_ram_value:
                 self.resource_ram_value.config(text="0.0%")
+            if self.resource_gpu_bar:
+                self.resource_gpu_bar["value"] = 0
+            if self.resource_gpu_value:
+                self.resource_gpu_value.config(text="0.0%")
             if self.resource_temp_bar:
                 self.resource_temp_bar["value"] = 0
             if self.resource_temp_value:
@@ -3040,6 +3075,9 @@ class GlitchGUI:
         try:
             cpu_pct = float(psutil.cpu_percent(None))
             mem = psutil.virtual_memory()
+            gpu_pct = self.probe_gpu_usage()
+            if gpu_pct is None:
+                gpu_pct = 0.0
             temp_root = getattr(self, "temp_storage_root", tempfile.gettempdir())
             temp_usage = shutil.disk_usage(temp_root)
             temp_pct = (temp_usage.used / temp_usage.total * 100.0) if temp_usage.total else 0.0
@@ -3055,6 +3093,10 @@ class GlitchGUI:
             self.resource_ram_bar["value"] = max(0.0, min(100.0, float(mem.percent)))
         if self.resource_ram_value:
             self.resource_ram_value.config(text=f"{mem.percent:.1f}% ({human_bytes(mem.used)} / {human_bytes(mem.total)})")
+        if self.resource_gpu_bar:
+            self.resource_gpu_bar["value"] = max(0.0, min(100.0, float(gpu_pct)))
+        if self.resource_gpu_value:
+            self.resource_gpu_value.config(text=f"{gpu_pct:.1f}%")
         if self.resource_temp_bar:
             self.resource_temp_bar["value"] = max(0.0, min(100.0, temp_pct))
         if self.resource_temp_value:
@@ -3062,7 +3104,7 @@ class GlitchGUI:
                 text=f"{temp_pct:.1f}% ({human_bytes(temp_usage.used)} / {human_bytes(temp_usage.total)})"
             )
         if self.resource_temp_type:
-            self.resource_temp_type.config(text=f"Using {'RAM-backed' if temp_is_ram else 'disk-backed'} temp")
+            self.resource_temp_type.config(text=f"Using {'RAM-backed' if temp_is_ram else 'disk-backed'} storage")
         self.root.after(2500, self.refresh_resource_monitor)
     def randomize_render_seed(self):
         self.render_seed.set(str(random.SystemRandom().randint(1, 2**63 - 1)))
