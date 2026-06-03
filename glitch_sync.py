@@ -1954,6 +1954,7 @@ class GlitchGUI:
         self.tooltips = []
         self.recent_projects = self.load_recent_projects()
         self.recent_projects_menu = None
+        self.render_seed_status_label = None
         self.last_render_output_path = None
         self.last_progress_val = 0
         self.active_processor = None
@@ -2119,8 +2120,12 @@ class GlitchGUI:
         seed_controls.columnconfigure(0, weight=1)
         render_seed_entry = ttk.Entry(seed_controls, textvariable=self.render_seed)
         render_seed_entry.grid(row=0, column=0, sticky="ew")
+        seed_copy_button = ttk.Button(seed_controls, text="Copy", command=self.copy_render_seed)
+        seed_copy_button.grid(row=0, column=1, padx=(5, 0))
         seed_randomize_button = ttk.Button(seed_controls, text="Randomize", command=self.randomize_render_seed)
-        seed_randomize_button.grid(row=0, column=1, padx=(5, 0))
+        seed_randomize_button.grid(row=0, column=2, padx=(5, 0))
+        self.render_seed_status_label = ttk.Label(seed_controls, text="Auto", width=5)
+        self.render_seed_status_label.grid(row=0, column=3, padx=(8, 0))
         output_name_mode = ttk.Checkbutton(io, text="Increment if exists", variable=self.increment_output_if_exists)
         output_name_mode.grid(row=7, column=1, sticky="w")
         ttk.Label(io, text="Render length:").grid(row=8, column=0, sticky="w")
@@ -2153,7 +2158,10 @@ class GlitchGUI:
         ttk.Button(lut_controls, text="...", command=self.pick_lut, width=3).grid(row=0, column=1, padx=(5, 0))
         ttk.Button(lut_controls, text="Clear", command=self.clear_lut).grid(row=0, column=2, padx=(5, 0))
         self.add_tooltip(render_seed_entry, "Leave blank for a fresh random seed. Enter a number to reproduce the same render later.")
+        self.add_tooltip(seed_copy_button, "Copy the current seed to the clipboard.")
         self.add_tooltip(seed_randomize_button, "Fill the seed field with a new random value.")
+        self.render_seed.trace_add("write", lambda *_: self.update_render_seed_status())
+        self.update_render_seed_status()
 
         pv = ttk.LabelFrame(m, text="Live Preview & Review", padding="10"); pv.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
         self.cv = tk.Canvas(pv, width=480, height=270, bg="black"); self.cv.pack(pady=5)
@@ -2415,8 +2423,21 @@ class GlitchGUI:
     def update_ai_blend_label(self):
         if self.ai_blend_label:
             self.ai_blend_label.config(text=f"{self.ai_blend.get():.2f}")
+    def update_render_seed_status(self):
+        if self.render_seed_status_label:
+            self.render_seed_status_label.config(text="Auto" if not self.render_seed.get().strip() else "Fixed")
     def randomize_render_seed(self):
         self.render_seed.set(str(random.SystemRandom().randint(1, 2**63 - 1)))
+    def copy_render_seed(self):
+        seed = self.render_seed.get().strip()
+        if not seed:
+            return messagebox.showinfo("Seed", "The seed is currently auto-generated. Run a render first, or enter a seed to copy.")
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(seed)
+            self.root.update()
+        except Exception as e:
+            return messagebox.showerror("Seed", f"Could not copy seed: {e}")
     def load_styles_file(self):
         try:
             with open(STYLE_CONFIG_PATH, "r", encoding="utf-8") as f:
