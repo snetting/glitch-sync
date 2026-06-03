@@ -712,6 +712,7 @@ class GlitchProcessor:
                  color_reference_idx=None, color_match_strength=0.0,
                  lut_path="", output_resolution=None, export_quality_label="High quality (slower)",
                  effect_timing=None,
+                 experimental_mode=False,
                  ai_enabled=False, ai_segment_anchor_only=True, ai_backend_url=AI_DEFAULT_BACKEND_URL,
                  ai_prompt=AI_DEFAULT_PROMPT, ai_negative_prompt=AI_DEFAULT_NEGATIVE_PROMPT,
                  ai_every_n_frames=AI_DEFAULT_EVERY_N_FRAMES, ai_denoise=AI_DEFAULT_DENOISE,
@@ -736,6 +737,7 @@ class GlitchProcessor:
         self.lut = None
         self.output_resolution = output_resolution
         self.export_quality_label = export_quality_label
+        self.experimental_mode = bool(experimental_mode)
         self.ai_enabled = bool(ai_enabled)
         self.ai_segment_anchor_only = bool(ai_segment_anchor_only)
         self.ai_backend_url = ai_backend_url.strip()
@@ -789,7 +791,7 @@ class GlitchProcessor:
         )
 
     def ai_stylization_active(self):
-        return self.ai_enabled and bool(self.ai_backend_url) and bool(self.ai_prompt)
+        return self.experimental_mode and self.ai_enabled and bool(self.ai_backend_url) and bool(self.ai_prompt)
 
     def ai_backend_base_url(self):
         return self.ai_backend_url.rstrip("/")
@@ -1642,7 +1644,8 @@ class GlitchGUI:
         self.output_resolution_label = tk.StringVar(value="Auto (first input)")
         self.export_quality_label = tk.StringVar(value="High quality (slower)")
         self.increment_output_if_exists = tk.BooleanVar(value=False)
-        self.ai_panel_visible = tk.BooleanVar(value=False)
+        self.experimental_mode = tk.BooleanVar(value=False)
+        self.ai_panel_visible = self.experimental_mode
         self.ai_enabled = tk.BooleanVar(value=False)
         self.ai_segment_anchor_only = tk.BooleanVar(value=True)
         self.ai_backend_url = tk.StringVar(value=AI_DEFAULT_BACKEND_URL)
@@ -1737,6 +1740,13 @@ class GlitchGUI:
         file_menu.add_separator()
         file_menu.add_command(label="Clear Analysis Cache...", command=self.clear_analysis_cache)
         menubar.add_cascade(label="File", menu=file_menu)
+        options_menu = tk.Menu(menubar, tearoff=0)
+        options_menu.add_checkbutton(
+            label="Experimental mode",
+            variable=self.experimental_mode,
+            command=self.toggle_experimental_mode,
+        )
+        menubar.add_cascade(label="Options", menu=options_menu)
         self.root.config(menu=menubar)
 
     def clear_analysis_cache(self):
@@ -1866,9 +1876,6 @@ class GlitchGUI:
         ttk.Button(set_f, text="Load Style", command=self.load_named_style).grid(row=10, column=2, sticky="ew")
         ttk.Button(set_f, text="Auto Style", command=self.auto_style).grid(row=11, column=1, sticky="ew")
         ttk.Button(set_f, text="Delete Style", command=self.delete_named_style).grid(row=11, column=2, sticky="ew")
-        ai_toggle = ttk.Checkbutton(set_f, text="Show AI panel", variable=self.ai_panel_visible, command=self.toggle_ai_panel)
-        ai_toggle.grid(row=12, column=0, sticky="w")
-
         self.ai_frame = ttk.LabelFrame(set_f, text="Experimental AI Stylization", padding="10")
         self.ai_frame.grid(row=13, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         self.ai_frame.columnconfigure(1, weight=1)
@@ -1918,7 +1925,6 @@ class GlitchGUI:
         ai_segment_anchor = ttk.Checkbutton(self.ai_frame, text="Segment anchor only", variable=self.ai_segment_anchor_only)
         ai_segment_anchor.grid(row=10, column=0, sticky="w")
 
-        self.add_tooltip(ai_toggle, "Show or hide the experimental AI stylization controls.")
         self.add_tooltip(ai_backend_entry, "Base URL for your local Easy Diffusion instance, usually http://127.0.0.1:9000.")
         self.add_tooltip(ai_prompt_entry, "Prompt sent to the image model for stylization.")
         self.add_tooltip(ai_negative_entry, "Negative prompt to suppress unwanted artifacts.")
@@ -1932,8 +1938,7 @@ class GlitchGUI:
         self.update_ai_denoise_label()
         self.update_ai_cfg_scale_label()
         self.update_ai_blend_label()
-        if not self.ai_panel_visible.get():
-            self.ai_frame.grid_remove()
+        self.toggle_experimental_mode()
 
         self.add_tooltip(beat_sync_cb, "Enable beat detection so clip boundaries follow the music.")
         self.add_tooltip(output_name_mode, "When enabled, existing output files are preserved and a numeric suffix is added.")
@@ -1988,10 +1993,13 @@ class GlitchGUI:
         self.log_t.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n"); self.log_t.see(tk.END)
     def add_tooltip(self, widget, text):
         self.tooltips.append(ToolTip(widget, text))
-    def toggle_ai_panel(self):
-        if self.ai_panel_visible.get():
+    def toggle_experimental_mode(self):
+        if not hasattr(self, "ai_frame"):
+            return
+        if self.experimental_mode.get():
             self.ai_frame.grid()
         else:
+            self.ai_enabled.set(False)
             self.ai_frame.grid_remove()
     def add_effect_control(self, parent, row, label, enabled_var, amount_name, max_value=2.0):
         check = ttk.Checkbutton(parent, text=label, variable=enabled_var)
@@ -2080,6 +2088,7 @@ class GlitchGUI:
             "output_resolution_label": self.output_resolution_label.get(),
             "export_quality_label": self.export_quality_label.get(),
             "increment_output_if_exists": self.increment_output_if_exists.get(),
+            "experimental_mode": self.experimental_mode.get(),
             "ai_panel_visible": self.ai_panel_visible.get(),
             "ai_enabled": self.ai_enabled.get(),
             "ai_segment_anchor_only": self.ai_segment_anchor_only.get(),
@@ -2259,8 +2268,12 @@ class GlitchGUI:
             else "High quality (slower)"
         )
         self.increment_output_if_exists.set(settings.get("increment_output_if_exists", self.increment_output_if_exists.get()))
-        self.ai_panel_visible.set(settings.get("ai_panel_visible", self.ai_panel_visible.get()))
-        self.ai_enabled.set(settings.get("ai_enabled", self.ai_enabled.get()))
+        experimental_mode = settings.get("experimental_mode")
+        if experimental_mode is None:
+            experimental_mode = settings.get("ai_panel_visible", self.experimental_mode.get())
+        self.experimental_mode.set(bool(experimental_mode))
+        self.ai_panel_visible.set(self.experimental_mode.get())
+        self.ai_enabled.set(settings.get("ai_enabled", self.ai_enabled.get()) if self.experimental_mode.get() else False)
         self.ai_segment_anchor_only.set(settings.get("ai_segment_anchor_only", self.ai_segment_anchor_only.get()))
         self.ai_backend_url.set(settings.get("ai_backend_url", self.ai_backend_url.get()))
         self.ai_prompt.set(settings.get("ai_prompt", self.ai_prompt.get()))
@@ -2320,7 +2333,7 @@ class GlitchGUI:
         self.update_ai_cfg_scale_label()
         self.update_ai_blend_label()
         self.update_primary_focus_label()
-        self.toggle_ai_panel()
+        self.toggle_experimental_mode()
     def save_named_style(self):
         name = self.style_name.get().strip()
         if not name:
@@ -2554,6 +2567,7 @@ class GlitchGUI:
                 output_resolution,
                 self.export_quality_label.get(),
                 effect_timing,
+                self.experimental_mode.get(),
                 self.ai_enabled.get(),
                 self.ai_segment_anchor_only.get(),
                 self.ai_backend_url.get(),
