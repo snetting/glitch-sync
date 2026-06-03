@@ -88,6 +88,9 @@ ANALYSIS_CACHE_VERSION = "7"
 ANALYSIS_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "glitchsync", "analysis")
 STATIC_MOTION_THRESHOLD = 0.018
 LAB_EPSILON = 1e-6
+SOURCE_LOCK_PENALTY_START = 4.0
+SOURCE_LOCK_PENALTY_DECAY = 0.82
+SOURCE_LOCK_PENALTY_MAX = 10.0
 AI_DEFAULT_BACKEND_URL = "http://127.0.0.1:9000"
 AI_DEFAULT_PROMPT = "dreamlike transformation of the input image, preserve the original subject and composition, and reimagine it as a surreal cinematic dream scene with soft painterly detail"
 AI_DEFAULT_NEGATIVE_PROMPT = "blurry, low quality, watermark, text"
@@ -791,6 +794,7 @@ class GlitchProcessor:
         self.stop_requested = False
         self.current_vid_idx = 0
         self.recent_matches = {idx: deque(maxlen=8) for idx in range(len(self.inputs))}
+        self.source_lock_penalties = [0.0 for _ in self.inputs]
 
     def log(self, msg):
         if self.log_callback: self.log_callback(msg)
@@ -1038,6 +1042,9 @@ class GlitchProcessor:
         weights = []
         for v_idx, f_idx in candidates:
             weight = 1.0
+            lock_penalty = self.source_lock_penalties[v_idx] if v_idx < len(self.source_lock_penalties) else 0.0
+            if lock_penalty > 0:
+                weight *= 1.0 / (1.0 + lock_penalty)
             history = self.recent_matches.get(v_idx)
             if history:
                 nearest = min(abs(f_idx - prev) for prev in history)
@@ -1058,6 +1065,22 @@ class GlitchProcessor:
                 weight *= max(0.05, 1.0 + (self.music_match * 5.0 * closeness))
             weights.append(weight)
         return random.choices(candidates, weights=weights, k=1)[0]
+
+    def decay_source_lock_penalties(self):
+        if not self.source_lock_penalties:
+            return
+        for idx, penalty in enumerate(self.source_lock_penalties):
+            if penalty > 0:
+                self.source_lock_penalties[idx] = max(0.0, penalty * SOURCE_LOCK_PENALTY_DECAY)
+
+    def penalize_source_lock(self, source_idx, source_streak):
+        if source_idx is None or not (0 <= source_idx < len(self.source_lock_penalties)):
+            return
+        penalty = min(
+            SOURCE_LOCK_PENALTY_MAX,
+            SOURCE_LOCK_PENALTY_START + max(0, source_streak - 5) * 0.75,
+        )
+        self.source_lock_penalties[source_idx] = max(self.source_lock_penalties[source_idx], penalty)
 
     def motion_scale(self, motion_db):
         scores = []
@@ -1303,6 +1326,7 @@ class GlitchProcessor:
         if candidates_primary and random.random() < self.primary_focus:
             return self.choose_candidate(candidates_primary, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
         if source_streak >= 5 and candidates_other:
+            self.penalize_source_lock(current_vid_idx, source_streak)
             self.log(
                 f"  Source lock detected after {source_streak} same-source segments; "
                 f"forcing an alternate source near brightness {target_b} "
@@ -1310,6 +1334,7 @@ class GlitchProcessor:
             )
             return self.choose_candidate(candidates_other, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
         if source_streak >= 5 and candidates_current and not candidates_other:
+            self.penalize_source_lock(current_vid_idx, source_streak)
             self.log(
                 f"  Source lock detected after {source_streak} same-source segments; "
                 f"no alternate candidates exist near brightness {target_b} "
@@ -1464,6 +1489,7 @@ class GlitchProcessor:
             target_brightness = int(np.clip(((1 - self.music_match) * curr_rms) + (self.music_match * music_energy), 0, 1) * 255)
             target_brightness_norm = target_brightness / 255.0
             target_activity = np.clip((clip_rms * 0.45) + (clip_bass * 0.40) + (clip_highs * 0.15), 0, 1)
+            self.decay_source_lock_penalties()
             
             match = self.find_best_match(
                 target_brightness,
