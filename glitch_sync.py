@@ -106,6 +106,7 @@ AI_OBSOLETE_NEGATIVE_PROMPTS = {
 AI_OBSOLETE_PROMPTS = {
     "hand drawn illustration, expressive linework",
 }
+AI_DREAM_TIMING_LABELS = ("Clip", "Random")
 
 
 class ToolTip:
@@ -295,7 +296,7 @@ def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=T
                color_match_enabled=False, color_match_strength=0.5,
                output_resolution_label="Auto (first input)",
                export_quality_label="High quality (slower)", render_mode="Full",
-               snippet_duration=30.0, lut_path="", ai_dream_chance=0.25):
+               snippet_duration=30.0, lut_path="", ai_dream_chance=0.25, ai_dream_timing="Clip"):
     return {
         "export_mode_label": export_mode_label,
         "output_resolution_label": output_resolution_label,
@@ -338,11 +339,12 @@ def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=T
         "primary_enabled": primary_enabled,
         "primary_focus": primary_focus,
         "ai_dream_chance": ai_dream_chance,
+        "ai_dream_timing": ai_dream_timing,
     }
 
 
 BUILTIN_STYLES = {
-    DEFAULT_STYLE_NAME: make_style(ai_dream_chance=0.25),
+    DEFAULT_STYLE_NAME: make_style(ai_dream_chance=0.25, ai_dream_timing="Clip"),
     "Mellow Story": make_style(
         duration=0.8,
         coherence=0.85,
@@ -357,6 +359,7 @@ BUILTIN_STYLES = {
         effect_timing={"pixelate": "Clip", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Clip", "shake": "Clip", "ghosting": "Clip", "monochrome": "Clip", "hue_shift": "Clip", "vignette": "Clip", "static_pan_zoom": "Clip"},
         primary_focus=0.9,
         ai_dream_chance=0.20,
+        ai_dream_timing="Clip",
     ),
     "Pop Performance": make_style(
         coherence=0.65,
@@ -370,6 +373,7 @@ BUILTIN_STYLES = {
         effect_amounts={"pixelate": 0.5, "flash": 0.55, "rewind": 0.2, "rgb_shift": 0.65, "shake": 0.45, "ghosting": 0.5, "monochrome": 0.0, "hue_shift": 0.22, "vignette": 0.25, "static_pan_zoom": 0.35},
         effect_timing={"pixelate": "Random", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Random", "shake": "Frame", "ghosting": "Random", "monochrome": "Clip", "hue_shift": "Random", "vignette": "Random", "static_pan_zoom": "Clip"},
         ai_dream_chance=0.22,
+        ai_dream_timing="Clip",
     ),
     "EDM Pulse": make_style(
         coherence=0.35,
@@ -383,6 +387,7 @@ BUILTIN_STYLES = {
         effect_amounts={"pixelate": 1.2, "flash": 1.25, "rewind": 0.45, "rgb_shift": 1.25, "shake": 1.1, "ghosting": 0.65, "monochrome": 0.0, "hue_shift": 0.75, "vignette": 0.45, "static_pan_zoom": 0.25},
         effect_timing={"pixelate": "Random", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Frame", "shake": "Frame", "ghosting": "Random", "monochrome": "Clip", "hue_shift": "Frame", "vignette": "Random", "static_pan_zoom": "Clip"},
         ai_dream_chance=0.30,
+        ai_dream_timing="Clip",
     ),
     "Rock Punch": make_style(
         coherence=0.5,
@@ -396,6 +401,7 @@ BUILTIN_STYLES = {
         effect_amounts={"pixelate": 0.65, "flash": 0.6, "rewind": 0.25, "rgb_shift": 0.65, "shake": 1.25, "ghosting": 0.35, "monochrome": 0.25, "hue_shift": 0.0, "vignette": 0.55, "static_pan_zoom": 0.25},
         effect_timing={"pixelate": "Random", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Random", "shake": "Frame", "ghosting": "Frame", "monochrome": "Random", "hue_shift": "Clip", "vignette": "Clip", "static_pan_zoom": "Clip"},
         ai_dream_chance=0.18,
+        ai_dream_timing="Clip",
     ),
     "Ambient Drift": make_style(
         duration=1.0,
@@ -411,6 +417,7 @@ BUILTIN_STYLES = {
         effect_timing={"pixelate": "Clip", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Clip", "shake": "Clip", "ghosting": "Clip", "monochrome": "Clip", "hue_shift": "Clip", "vignette": "Clip", "static_pan_zoom": "Clip"},
         primary_focus=0.95,
         ai_dream_chance=0.65,
+        ai_dream_timing="Clip",
     ),
     "Glitch Heavy": make_style(
         coherence=0.15,
@@ -424,6 +431,7 @@ BUILTIN_STYLES = {
         effect_amounts={"pixelate": 1.7, "flash": 1.15, "rewind": 0.8, "rgb_shift": 1.8, "shake": 1.4, "ghosting": 1.0, "monochrome": 0.0, "hue_shift": 0.9, "vignette": 0.65, "static_pan_zoom": 0.2},
         effect_timing={"pixelate": "Random", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Random", "shake": "Frame", "ghosting": "Random", "monochrome": "Clip", "hue_shift": "Random", "vignette": "Random", "static_pan_zoom": "Clip"},
         ai_dream_chance=0.24,
+        ai_dream_timing="Clip",
     ),
 }
 
@@ -724,6 +732,7 @@ class GlitchProcessor:
                  effect_timing=None,
                  experimental_mode=False,
                  ai_dream_chance=0.25,
+                 ai_dream_timing="Clip",
                  ai_enabled=False, ai_segment_anchor_only=True, ai_backend_url=AI_DEFAULT_BACKEND_URL,
                  ai_prompt=AI_DEFAULT_PROMPT, ai_negative_prompt=AI_DEFAULT_NEGATIVE_PROMPT,
                  ai_every_n_frames=AI_DEFAULT_EVERY_N_FRAMES, ai_denoise=AI_DEFAULT_DENOISE,
@@ -750,6 +759,7 @@ class GlitchProcessor:
         self.export_quality_label = export_quality_label
         self.experimental_mode = bool(experimental_mode)
         self.ai_dream_chance = float(np.clip(ai_dream_chance, 0.0, 1.0))
+        self.ai_dream_timing = ai_dream_timing if ai_dream_timing in AI_DREAM_TIMING_LABELS else "Clip"
         self.ai_enabled = bool(ai_enabled)
         self.ai_segment_anchor_only = bool(ai_segment_anchor_only)
         self.ai_backend_url = ai_backend_url.strip()
@@ -807,6 +817,8 @@ class GlitchProcessor:
 
     def ai_segment_probability(self, clip_rms):
         base = float(np.clip(self.ai_dream_chance, 0.0, 1.0))
+        if self.ai_dream_timing == "Random":
+            return base
         quietness = float(np.clip(1.0 - clip_rms, 0.0, 1.0))
         boosted = base + ((1.0 - base) * quietness * 0.75)
         return float(np.clip(boosted, 0.0, 1.0))
@@ -1669,7 +1681,7 @@ class GlitchGUI:
         self.experimental_mode = tk.BooleanVar(value=False)
         self.ai_panel_visible = self.experimental_mode
         self.ai_dream_chance = tk.DoubleVar(value=0.25)
-        self.ai_dream_chance_label = None
+        self.ai_dream_timing = tk.StringVar(value="Clip")
         self.ai_enabled = tk.BooleanVar(value=False)
         self.ai_segment_anchor_only = tk.BooleanVar(value=True)
         self.ai_backend_url = tk.StringVar(value=AI_DEFAULT_BACKEND_URL)
@@ -1900,17 +1912,8 @@ class GlitchGUI:
         ttk.Button(set_f, text="Load Style", command=self.load_named_style).grid(row=10, column=2, sticky="ew")
         ttk.Button(set_f, text="Auto Style", command=self.auto_style).grid(row=11, column=1, sticky="ew")
         ttk.Button(set_f, text="Delete Style", command=self.delete_named_style).grid(row=11, column=2, sticky="ew")
-        ai_dream_label = ttk.Label(set_f, text="AI dream chance:")
-        ai_dream_label.grid(row=12, column=0)
-        ai_dream_controls = ttk.Frame(set_f)
-        ai_dream_controls.grid(row=12, column=1, sticky="ew")
-        ai_dream_controls.columnconfigure(0, weight=1)
-        ai_dream_scale = ttk.Scale(ai_dream_controls, from_=0.0, to=1.0, variable=self.ai_dream_chance, command=lambda e: self.update_ai_dream_chance_label())
-        ai_dream_scale.grid(row=0, column=0, sticky="ew")
-        self.ai_dream_chance_label = ttk.Label(ai_dream_controls, text=f"{self.ai_dream_chance.get():.2f}", width=5)
-        self.ai_dream_chance_label.grid(row=0, column=1, sticky="w", padx=(8, 0))
         self.ai_frame = ttk.LabelFrame(set_f, text="Experimental AI Stylization", padding="10")
-        self.ai_frame.grid(row=13, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        self.ai_frame.grid(row=12, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         self.ai_frame.columnconfigure(1, weight=1)
         ttk.Checkbutton(self.ai_frame, text="Enable AI stylization", variable=self.ai_enabled).grid(row=0, column=0, sticky="w")
         ttk.Label(self.ai_frame, text="Easy Diffusion URL:").grid(row=1, column=0, sticky="w")
@@ -1995,8 +1998,6 @@ class GlitchGUI:
         self.add_tooltip(style_name_entry, "Enter a name before saving a custom style.")
         self.add_tooltip(load_style_label, "Choose a saved style to restore a preset configuration.")
         self.add_tooltip(self.style_combo, "Select a built-in or saved style.")
-        self.add_tooltip(ai_dream_label, "Probability that a clip gets AI stylization, with quieter sections favored automatically.")
-        self.add_tooltip(ai_dream_scale, "Higher values make AI more likely to appear on a clip; quieter clips get a stronger boost.")
 
         fx = ttk.LabelFrame(m, text="Effects", padding="10"); fx.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
         fx.columnconfigure(1, weight=1)
@@ -2012,6 +2013,21 @@ class GlitchGUI:
         self.add_effect_control(fx, 8, "Hue Shift", self.hue_shift, "hue_shift")
         self.add_effect_control(fx, 9, "Vignette", self.vignette, "vignette")
         self.add_effect_control(fx, 10, "Static Pan/Zoom", self.static_pan_zoom, "static_pan_zoom", 1.0)
+        ai_dream_label, ai_dream_scale, ai_dream_timing = self.add_effect_control(
+            fx,
+            11,
+            "AI Dream Chance",
+            None,
+            "ai_dream_chance",
+            1.0,
+            amount_var=self.ai_dream_chance,
+            timing_var=self.ai_dream_timing,
+            timing_values=AI_DREAM_TIMING_LABELS,
+            show_check=False,
+        )
+        self.add_tooltip(ai_dream_label, "Probability that a clip gets AI stylization, with quieter sections favored automatically.")
+        self.add_tooltip(ai_dream_scale, "Higher values make AI more likely to appear on a clip; quieter clips get a stronger boost.")
+        self.add_tooltip(ai_dream_timing, "Clip uses quietness-weighted probability. Random uses the base probability without the quietness boost.")
 
         log_f = ttk.LabelFrame(m, text="Engine Log", padding="5"); log_f.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=5)
         self.log_t = tk.Text(log_f, height=8, font=('Consolas', 9)); self.log_t.pack(fill=tk.BOTH, expand=True)
@@ -2036,18 +2052,31 @@ class GlitchGUI:
         else:
             self.ai_enabled.set(False)
             self.ai_frame.grid_remove()
-    def add_effect_control(self, parent, row, label, enabled_var, amount_name, max_value=2.0):
-        check = ttk.Checkbutton(parent, text=label, variable=enabled_var)
-        check.grid(row=row, column=0, sticky="w")
-        scale = ttk.Scale(parent, from_=0.0, to=max_value, variable=self.effect_amounts[amount_name], command=lambda e, name=amount_name: self.update_effect_amount_label(name))
+    def add_effect_control(self, parent, row, label, enabled_var, amount_name, max_value=2.0, amount_var=None, timing_var=None, timing_values=None, show_check=True):
+        amount_var = amount_var or self.effect_amounts[amount_name]
+        timing_var = timing_var or self.effect_timing[amount_name]
+        timing_values = timing_values or EFFECT_TIMING_LABELS
+        if show_check:
+            check = ttk.Checkbutton(parent, text=label, variable=enabled_var)
+            check.grid(row=row, column=0, sticky="w")
+        else:
+            check = ttk.Label(parent, text=label)
+            check.grid(row=row, column=0, sticky="w")
+        scale = ttk.Scale(parent, from_=0.0, to=max_value, variable=amount_var, command=lambda e, name=amount_name: self.update_effect_amount_label(name))
         scale.grid(row=row, column=1, sticky="ew", padx=5)
-        self.effect_amount_labels[amount_name] = ttk.Label(parent, text=f"{self.effect_amounts[amount_name].get():.2f}", width=5)
+        self.effect_amount_labels[amount_name] = ttk.Label(parent, text=f"{amount_var.get():.2f}", width=5)
         self.effect_amount_labels[amount_name].grid(row=row, column=2, sticky="e")
-        timing = ttk.Combobox(parent, textvariable=self.effect_timing[amount_name], values=EFFECT_TIMING_LABELS, state="readonly", width=6)
+        timing = ttk.Combobox(parent, textvariable=timing_var, values=timing_values, state="readonly", width=6)
         timing.grid(row=row, column=3, sticky="w", padx=(8, 0))
         return check, scale, timing
     def update_effect_amount_label(self, amount_name):
-        self.effect_amount_labels[amount_name].config(text=f"{self.effect_amounts[amount_name].get():.2f}")
+        if amount_name not in self.effect_amount_labels:
+            return
+        if amount_name == "ai_dream_chance":
+            value = self.ai_dream_chance.get()
+        else:
+            value = self.effect_amounts[amount_name].get()
+        self.effect_amount_labels[amount_name].config(text=f"{value:.2f}")
     def update_primary_focus_label(self):
         if self.primary_focus_label:
             self.primary_focus_label.config(text=f"{self.primary_focus.get():.2f}")
@@ -2072,9 +2101,6 @@ class GlitchGUI:
     def update_ai_blend_label(self):
         if self.ai_blend_label:
             self.ai_blend_label.config(text=f"{self.ai_blend.get():.2f}")
-    def update_ai_dream_chance_label(self):
-        if self.ai_dream_chance_label:
-            self.ai_dream_chance_label.config(text=f"{self.ai_dream_chance.get():.2f}")
     def load_styles_file(self):
         try:
             with open(STYLE_CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -2138,6 +2164,7 @@ class GlitchGUI:
             "increment_output_if_exists": self.increment_output_if_exists.get(),
             "experimental_mode": self.experimental_mode.get(),
             "ai_dream_chance": self.ai_dream_chance.get(),
+            "ai_dream_timing": self.ai_dream_timing.get(),
             "ai_panel_visible": self.ai_panel_visible.get(),
             "ai_enabled": self.ai_enabled.get(),
             "ai_segment_anchor_only": self.ai_segment_anchor_only.get(),
@@ -2323,6 +2350,8 @@ class GlitchGUI:
         self.experimental_mode.set(bool(experimental_mode))
         self.ai_panel_visible.set(self.experimental_mode.get())
         self.ai_dream_chance.set(settings.get("ai_dream_chance", self.ai_dream_chance.get()))
+        ai_dream_timing = settings.get("ai_dream_timing", self.ai_dream_timing.get())
+        self.ai_dream_timing.set(ai_dream_timing if ai_dream_timing in AI_DREAM_TIMING_LABELS else "Clip")
         self.ai_enabled.set(settings.get("ai_enabled", self.ai_enabled.get()) if self.experimental_mode.get() else False)
         self.ai_segment_anchor_only.set(settings.get("ai_segment_anchor_only", self.ai_segment_anchor_only.get()))
         self.ai_backend_url.set(settings.get("ai_backend_url", self.ai_backend_url.get()))
@@ -2382,7 +2411,7 @@ class GlitchGUI:
         self.update_ai_denoise_label()
         self.update_ai_cfg_scale_label()
         self.update_ai_blend_label()
-        self.update_ai_dream_chance_label()
+        self.update_effect_amount_label("ai_dream_chance")
         self.update_primary_focus_label()
         self.toggle_experimental_mode()
     def save_named_style(self):
@@ -2620,6 +2649,7 @@ class GlitchGUI:
                 effect_timing,
                 self.experimental_mode.get(),
                 self.ai_dream_chance.get(),
+                self.ai_dream_timing.get(),
                 self.ai_enabled.get(),
                 self.ai_segment_anchor_only.get(),
                 self.ai_backend_url.get(),
