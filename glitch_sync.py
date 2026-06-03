@@ -830,8 +830,10 @@ class GlitchProcessor:
         base = float(np.clip(self.ai_dream_chance, 0.0, 1.0))
         if self.ai_dream_timing == "Random":
             return base
-        quietness = float(np.clip(1.0 - clip_rms, 0.0, 1.0))
-        boosted = base + ((1.0 - base) * (quietness ** 1.6) * 0.9)
+        # Only boost noticeably on genuinely quiet sections; keep the default
+        # chance closer to the user's slider value on most clips.
+        quietness = float(np.clip((0.75 - clip_rms) / 0.75, 0.0, 1.0))
+        boosted = base + ((1.0 - base) * (quietness ** 2.2) * 0.2)
         return float(np.clip(boosted, 0.0, 1.0))
 
     def ai_backend_base_url(self):
@@ -1572,6 +1574,12 @@ class GlitchProcessor:
             target_brightness_norm = target_brightness / 255.0
             target_activity = np.clip((clip_rms * 0.45) + (clip_bass * 0.40) + (clip_highs * 0.15), 0, 1)
             self.decay_source_lock_penalties()
+            ai_segment_probability = self.ai_segment_probability(clip_rms)
+            if self.debug_match_logging:
+                self.log(
+                    f"  Debug AI: segment {i + 1}/{len(cut_times)} clip_rms={clip_rms:.2f} "
+                    f"prob={ai_segment_probability:.2f}"
+                )
             
             match = self.find_best_match(
                 target_brightness,
@@ -1652,7 +1660,7 @@ class GlitchProcessor:
                 segment_frames = []
                 ai_segment_active = (
                     self.ai_stylization_active()
-                    and random.random() < self.ai_segment_probability(clip_rms)
+                    and random.random() < ai_segment_probability
                 )
                 ai_anchor = None
                 ai_anchor_frame_idx = -1
