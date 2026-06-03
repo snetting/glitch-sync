@@ -737,7 +737,8 @@ class GlitchProcessor:
                  ai_prompt=AI_DEFAULT_PROMPT, ai_negative_prompt=AI_DEFAULT_NEGATIVE_PROMPT,
                  ai_every_n_frames=AI_DEFAULT_EVERY_N_FRAMES, ai_denoise=AI_DEFAULT_DENOISE,
                  ai_cfg_scale=AI_DEFAULT_CFG_SCALE, ai_steps=AI_DEFAULT_STEPS,
-                 ai_max_dim=AI_DEFAULT_MAX_DIM, ai_blend=AI_DEFAULT_BLEND):
+                 ai_max_dim=AI_DEFAULT_MAX_DIM, ai_blend=AI_DEFAULT_BLEND,
+                 verbose_match_logging=False):
         self.inputs, self.audio, self.output = inputs, audio, output
         self.duration, self.fps = duration, fps
         self.pixelate, self.flash, self.rewind = pixelate, flash, rewind
@@ -771,6 +772,7 @@ class GlitchProcessor:
         self.ai_steps = max(1, int(ai_steps))
         self.ai_max_dim = max(64, int(ai_max_dim))
         self.ai_blend = float(np.clip(ai_blend, 0.0, 1.0))
+        self.verbose_match_logging = bool(verbose_match_logging)
         self.ai_session = requests.Session()
         self.ai_backend_warning_shown = False
         self.ai_backend_model_warning_shown = False
@@ -2748,6 +2750,7 @@ class GlitchGUI:
                 self.ai_steps.get(),
                 self.ai_max_dim.get(),
                 self.ai_blend.get(),
+                self.verbose_match_logging.get(),
             )
             self.active_processor = p
             if self.render_was_stopped:
