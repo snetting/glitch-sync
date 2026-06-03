@@ -84,6 +84,8 @@ DEFAULT_EFFECT_TIMING = {
 }
 DEFAULT_STYLE_NAME = "Default"
 STYLE_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".glitchsync_styles.json")
+RECENT_PROJECTS_PATH = os.path.join(os.path.expanduser("~"), ".glitchsync_recent_projects.json")
+RECENT_PROJECTS_LIMIT = 8
 ANALYSIS_CACHE_VERSION = "7"
 ANALYSIS_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "glitchsync", "analysis")
 STATIC_MOTION_THRESHOLD = 0.018
@@ -742,7 +744,8 @@ class GlitchProcessor:
                  ai_every_n_frames=AI_DEFAULT_EVERY_N_FRAMES, ai_denoise=AI_DEFAULT_DENOISE,
                  ai_cfg_scale=AI_DEFAULT_CFG_SCALE, ai_steps=AI_DEFAULT_STEPS,
                  ai_max_dim=AI_DEFAULT_MAX_DIM, ai_blend=AI_DEFAULT_BLEND,
-                 verbose_match_logging=False):
+                 verbose_match_logging=False,
+                 debug_match_logging=False):
         self.inputs, self.audio, self.output = inputs, audio, output
         self.duration, self.fps = duration, fps
         self.pixelate, self.flash, self.rewind = pixelate, flash, rewind
@@ -777,6 +780,7 @@ class GlitchProcessor:
         self.ai_max_dim = max(64, int(ai_max_dim))
         self.ai_blend = float(np.clip(ai_blend, 0.0, 1.0))
         self.verbose_match_logging = bool(verbose_match_logging)
+        self.debug_match_logging = bool(debug_match_logging)
         self.ai_session = requests.Session()
         self.ai_backend_warning_shown = False
         self.ai_backend_model_warning_shown = False
@@ -1038,7 +1042,13 @@ class GlitchProcessor:
             and activity_scale > 0
         )
         if not use_variety and not use_activity:
-            return random.choice(candidates)
+            choice = random.choice(candidates)
+            if self.debug_match_logging:
+                self.log(
+                    f"  Debug pick: {os.path.basename(self.inputs[choice[0]])} frame {choice[1]} "
+                    f"(uniform among {len(candidates)} candidates)"
+                )
+            return choice
         max_count = max(source_use_counts) if source_use_counts else 0
         weights = []
         for v_idx, f_idx in candidates:
@@ -1065,7 +1075,20 @@ class GlitchProcessor:
                 closeness = 1.0 - abs(activity_norm - target_activity)
                 weight *= max(0.05, 1.0 + (self.music_match * 5.0 * closeness))
             weights.append(weight)
-        return random.choices(candidates, weights=weights, k=1)[0]
+        choice = random.choices(candidates, weights=weights, k=1)[0]
+        if self.debug_match_logging:
+            ranked = sorted(
+                zip(candidates, weights),
+                key=lambda item: item[1],
+                reverse=True,
+            )[:5]
+            summary = ", ".join(
+                f"{os.path.basename(self.inputs[v_idx])}@{f_idx}:{weight:.2f}"
+                for (v_idx, f_idx), weight in ranked
+            )
+            self.log(f"  Debug candidates ({len(candidates)}): {summary}")
+            self.log(f"  Debug pick: {os.path.basename(self.inputs[choice[0]])} frame {choice[1]}")
+        return choice
 
     def decay_source_lock_penalties(self):
         if not self.source_lock_penalties:
@@ -1329,6 +1352,21 @@ class GlitchProcessor:
                     candidates_primary.append((v_idx, f_idx))
                 if v_idx == current_vid_idx: candidates_current.append((v_idx, f_idx))
                 else: candidates_other.append((v_idx, f_idx))
+        if self.debug_match_logging:
+            current_lock_penalty = (
+                self.source_lock_penalties[current_vid_idx]
+                if 0 <= current_vid_idx < len(self.source_lock_penalties)
+                else 0.0
+            )
+            alternate_lock_penalty = max(
+                [self.source_lock_penalties[v_idx] for v_idx, _ in candidates_other]
+                or [0.0]
+            )
+            self.log(
+                f"  Debug pool: target_b={target_b} current={len(candidates_current)} other={len(candidates_other)} "
+                f"primary={len(candidates_primary)} streak={source_streak} "
+                f"lock={current_lock_penalty:.2f} alt_lock={alternate_lock_penalty:.2f}"
+            )
         if candidates_primary and random.random() < self.primary_focus:
             return self.choose_candidate(candidates_primary, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
         if source_streak >= SOURCE_LOCK_TRIGGER_STREAK and candidates_other:
@@ -1338,6 +1376,11 @@ class GlitchProcessor:
                 f"forcing an alternate source near brightness {target_b} "
                 f"({len(candidates_current)} current / {len(candidates_other)} alternate candidates)."
             )
+            if self.debug_match_logging:
+                self.log(
+                    f"  Debug lock: current={len(candidates_current)} alternate={len(candidates_other)} "
+                    f"primary={len(candidates_primary)} streak={source_streak}"
+                )
             return self.choose_candidate(candidates_other, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
         if source_streak >= SOURCE_LOCK_TRIGGER_STREAK and candidates_current and not candidates_other:
             self.penalize_source_lock(current_vid_idx, source_streak, 0, len(candidates_current))
@@ -1346,6 +1389,11 @@ class GlitchProcessor:
                 f"no alternate candidates exist near brightness {target_b} "
                 f"({len(candidates_current)} current / 0 alternate candidates)."
             )
+            if self.debug_match_logging:
+                self.log(
+                    f"  Debug lock: current={len(candidates_current)} alternate=0 "
+                    f"primary={len(candidates_primary)} streak={source_streak}"
+                )
         if candidates_current and (random.random() < self.coherence or not candidates_other):
             return self.choose_candidate(candidates_current, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
         if candidates_other:
@@ -1362,6 +1410,11 @@ class GlitchProcessor:
                 if primary_fallback and random.random() < self.primary_focus:
                     return self.choose_candidate(primary_fallback, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
             if fallback:
+                if self.debug_match_logging:
+                    self.log(
+                        f"  Debug fallback: offset={offset} candidates={len(fallback)} "
+                        f"primary={len(primary_fallback)}"
+                    )
                 return self.choose_candidate(fallback, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
             offset += 1
         return None
@@ -1791,6 +1844,7 @@ class GlitchGUI:
         self.export_quality_label = tk.StringVar(value="High quality (slower)")
         self.increment_output_if_exists = tk.BooleanVar(value=False)
         self.verbose_match_logging = tk.BooleanVar(value=False)
+        self.debug_match_logging = tk.BooleanVar(value=False)
         self.experimental_mode = tk.BooleanVar(value=False)
         self.ai_panel_visible = self.experimental_mode
         self.ai_dream_chance = tk.DoubleVar(value=0.25)
@@ -1844,6 +1898,8 @@ class GlitchGUI:
         self.style_combo = None
         self.styles = self.load_styles_file()
         self.tooltips = []
+        self.recent_projects = self.load_recent_projects()
+        self.recent_projects_menu = None
         self.last_render_output_path = None
         self.last_progress_val = 0
         self.active_processor = None
@@ -1883,6 +1939,8 @@ class GlitchGUI:
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="New", command=self.new_project)
         file_menu.add_command(label="Load Project...", command=self.load_project)
+        self.recent_projects_menu = tk.Menu(file_menu, tearoff=0)
+        file_menu.add_cascade(label="Recent Projects", menu=self.recent_projects_menu)
         file_menu.add_separator()
         file_menu.add_command(label="Save", command=self.save_project)
         file_menu.add_command(label="Save As...", command=self.save_project_as)
@@ -1897,6 +1955,7 @@ class GlitchGUI:
         )
         menubar.add_cascade(label="Options", menu=options_menu)
         self.root.config(menu=menubar)
+        self.refresh_recent_projects_menu()
 
     def clear_analysis_cache(self):
         if not os.path.exists(ANALYSIS_CACHE_DIR):
@@ -1909,6 +1968,74 @@ class GlitchGUI:
             messagebox.showinfo("Analysis Cache", "Analysis cache cleared.")
         except Exception as e:
             messagebox.showerror("Analysis Cache", f"Could not clear analysis cache:\n{e}")
+
+    def load_recent_projects(self):
+        try:
+            with open(RECENT_PROJECTS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, list):
+                return []
+            recent = []
+            seen = set()
+            for path in data:
+                if not isinstance(path, str):
+                    continue
+                abs_path = os.path.abspath(path)
+                if abs_path in seen or not os.path.exists(abs_path):
+                    continue
+                seen.add(abs_path)
+                recent.append(abs_path)
+            return recent[:RECENT_PROJECTS_LIMIT]
+        except FileNotFoundError:
+            return []
+        except Exception:
+            return []
+
+    def save_recent_projects(self):
+        try:
+            with open(RECENT_PROJECTS_PATH, "w", encoding="utf-8") as f:
+                json.dump(self.recent_projects[:RECENT_PROJECTS_LIMIT], f, indent=2)
+        except Exception as e:
+            self.log_msg(f"Could not save recent projects: {e}")
+
+    def refresh_recent_projects_menu(self):
+        if not self.recent_projects_menu:
+            return
+        self.recent_projects_menu.delete(0, tk.END)
+        if not self.recent_projects:
+            self.recent_projects_menu.add_command(label="(No recent projects)", state=tk.DISABLED)
+            return
+        for path in self.recent_projects[:RECENT_PROJECTS_LIMIT]:
+            label = os.path.basename(path)
+            self.recent_projects_menu.add_command(
+                label=label,
+                command=lambda p=path: self.load_project_path(p),
+            )
+
+    def add_recent_project(self, path):
+        if not path:
+            return
+        abs_path = os.path.abspath(path)
+        recent = [p for p in self.recent_projects if os.path.abspath(p) != abs_path]
+        recent.insert(0, abs_path)
+        self.recent_projects = recent[:RECENT_PROJECTS_LIMIT]
+        self.save_recent_projects()
+        self.refresh_recent_projects_menu()
+
+    def load_project_path(self, path):
+        if not path:
+            return
+        path = os.path.abspath(path)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                project = json.load(f)
+            self.apply_project(project)
+            self.current_project_path = path
+            self.update_project_title()
+            self.add_recent_project(path)
+        except Exception as e:
+            return messagebox.showerror("Error", f"Could not load project: {e}")
+        messagebox.showinfo("Loaded", f"Loaded project: {os.path.basename(path)}")
 
     def build_ui(self):
         m = ttk.Frame(self.root, padding="15"); m.pack(fill=tk.BOTH, expand=True)
@@ -2143,10 +2270,15 @@ class GlitchGUI:
         self.add_tooltip(ai_dream_timing, "Clip biases the chance upward in quieter clips. Random uses the base chance unchanged, regardless of audio energy.")
 
         log_f = ttk.LabelFrame(m, text="Engine Log", padding="5"); log_f.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=5)
-        verbose_match_cb = ttk.Checkbutton(log_f, text="Verbose match logging", variable=self.verbose_match_logging)
-        verbose_match_cb.pack(anchor="w", pady=(0, 4))
+        log_toggle_row = ttk.Frame(log_f)
+        log_toggle_row.pack(anchor="w", fill=tk.X, pady=(0, 4))
+        verbose_match_cb = ttk.Checkbutton(log_toggle_row, text="Verbose match logging", variable=self.verbose_match_logging)
+        verbose_match_cb.pack(side=tk.LEFT)
+        debug_match_cb = ttk.Checkbutton(log_toggle_row, text="Debug match logging", variable=self.debug_match_logging)
+        debug_match_cb.pack(side=tk.LEFT, padx=(12, 0))
         self.log_t = tk.Text(log_f, height=8, font=('Consolas', 9)); self.log_t.pack(fill=tk.BOTH, expand=True)
         self.add_tooltip(verbose_match_cb, "Show every segment match in the log instead of only the final summary.")
+        self.add_tooltip(debug_match_cb, "Show candidate pools, weights, and selection reasons to diagnose sticky source selection.")
         self.pg = ttk.Progressbar(m, orient=tk.HORIZONTAL, mode='determinate'); self.pg.grid(row=3, column=0, columnspan=2, sticky="ew", pady=5)
         render_buttons = ttk.Frame(m); render_buttons.grid(row=4, column=0, columnspan=2, sticky="ew", pady=10)
         render_buttons.columnconfigure(0, weight=1)
@@ -2282,6 +2414,7 @@ class GlitchGUI:
             "export_quality_label": self.export_quality_label.get(),
             "increment_output_if_exists": self.increment_output_if_exists.get(),
             "verbose_match_logging": self.verbose_match_logging.get(),
+            "debug_match_logging": self.debug_match_logging.get(),
             "experimental_mode": self.experimental_mode.get(),
             "ai_dream_chance": self.ai_dream_chance.get(),
             "ai_dream_timing": self.ai_dream_timing.get(),
@@ -2413,11 +2546,13 @@ class GlitchGUI:
             self.style_choice.set(project["style_choice"])
         self.apply_settings(project.get("settings", {}))
     def write_project(self, path):
+        path = os.path.abspath(path)
         self.sync_auto_output_to_project(path)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self.collect_project(), f, indent=2, sort_keys=True)
         self.current_project_path = path
         self.update_project_title()
+        self.add_recent_project(path)
     def save_project(self):
         if not self.current_project_path:
             return self.save_project_as()
@@ -2442,15 +2577,7 @@ class GlitchGUI:
         path = filedialog.askopenfilename(filetypes=[("GlitchSync Project", "*.glitchsync.json"), ("JSON", "*.json")])
         if not path:
             return
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                project = json.load(f)
-            self.apply_project(project)
-            self.current_project_path = path
-            self.update_project_title()
-        except Exception as e:
-            return messagebox.showerror("Error", f"Could not load project: {e}")
-        messagebox.showinfo("Loaded", f"Loaded project: {os.path.basename(path)}")
+        self.load_project_path(path)
     def apply_settings(self, settings):
         if not isinstance(settings, dict):
             return
@@ -2465,6 +2592,7 @@ class GlitchGUI:
         )
         self.increment_output_if_exists.set(settings.get("increment_output_if_exists", self.increment_output_if_exists.get()))
         self.verbose_match_logging.set(settings.get("verbose_match_logging", self.verbose_match_logging.get()))
+        self.debug_match_logging.set(settings.get("debug_match_logging", self.debug_match_logging.get()))
         experimental_mode = settings.get("experimental_mode")
         if experimental_mode is None:
             experimental_mode = settings.get("ai_panel_visible", self.experimental_mode.get())
@@ -2783,6 +2911,7 @@ class GlitchGUI:
                 self.ai_max_dim.get(),
                 self.ai_blend.get(),
                 self.verbose_match_logging.get(),
+                self.debug_match_logging.get(),
             )
             self.active_processor = p
             if self.render_was_stopped:
