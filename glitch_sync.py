@@ -88,6 +88,7 @@ ANALYSIS_CACHE_VERSION = "7"
 ANALYSIS_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "glitchsync", "analysis")
 STATIC_MOTION_THRESHOLD = 0.018
 LAB_EPSILON = 1e-6
+SOURCE_LOCK_TRIGGER_STREAK = 4
 SOURCE_LOCK_PENALTY_START = 4.0
 SOURCE_LOCK_PENALTY_DECAY = 0.82
 SOURCE_LOCK_PENALTY_MAX = 10.0
@@ -1078,7 +1079,7 @@ class GlitchProcessor:
             return
         penalty = min(
             SOURCE_LOCK_PENALTY_MAX,
-            SOURCE_LOCK_PENALTY_START + max(0, source_streak - 5) * 0.75,
+            SOURCE_LOCK_PENALTY_START + max(0, source_streak - SOURCE_LOCK_TRIGGER_STREAK) * 0.75,
         )
         self.source_lock_penalties[source_idx] = max(self.source_lock_penalties[source_idx], penalty)
 
@@ -1325,7 +1326,7 @@ class GlitchProcessor:
                 else: candidates_other.append((v_idx, f_idx))
         if candidates_primary and random.random() < self.primary_focus:
             return self.choose_candidate(candidates_primary, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
-        if source_streak >= 5 and candidates_other:
+        if source_streak >= SOURCE_LOCK_TRIGGER_STREAK and candidates_other:
             self.penalize_source_lock(current_vid_idx, source_streak)
             self.log(
                 f"  Source lock detected after {source_streak} same-source segments; "
@@ -1333,7 +1334,7 @@ class GlitchProcessor:
                 f"({len(candidates_current)} current / {len(candidates_other)} alternate candidates)."
             )
             return self.choose_candidate(candidates_other, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
-        if source_streak >= 5 and candidates_current and not candidates_other:
+        if source_streak >= SOURCE_LOCK_TRIGGER_STREAK and candidates_current and not candidates_other:
             self.penalize_source_lock(current_vid_idx, source_streak)
             self.log(
                 f"  Source lock detected after {source_streak} same-source segments; "
