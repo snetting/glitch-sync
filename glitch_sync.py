@@ -26,6 +26,7 @@ from datetime import datetime
 from PIL import Image, ImageTk
 import requests
 from requests import Response
+import psutil
 
 EXPORT_FINAL_VIDEO = "final_video"
 EXPORT_CUT_AWARE_MLT = "cut_aware_mlt"
@@ -398,6 +399,14 @@ def preferred_temp_root():
         if os.path.isdir(path) and os.access(path, os.W_OK | os.X_OK):
             return path
     return None
+
+
+def human_bytes(num):
+    num = float(num or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
+        if num < 1024.0 or unit == "PB":
+            return f"{num:.1f} {unit}"
+        num /= 1024.0
 
 
 class LosslessVideoWriter:
@@ -865,6 +874,7 @@ class GlitchProcessor:
                  ai_max_dim=AI_DEFAULT_MAX_DIM, ai_blend=AI_DEFAULT_BLEND,
                  verbose_match_logging=False,
                  debug_match_logging=False,
+                 temp_root=None,
                  render_seed=None):
         self.inputs, self.audio, self.output = inputs, audio, output
         self.duration, self.fps = duration, fps
@@ -902,6 +912,7 @@ class GlitchProcessor:
         self.ai_blend = float(np.clip(ai_blend, 0.0, 1.0))
         self.verbose_match_logging = bool(verbose_match_logging)
         self.debug_match_logging = bool(debug_match_logging)
+        self.temp_root = temp_root
         self.render_seed = render_seed
         self.ai_session = requests.Session()
         self.ai_backend_warning_shown = False
@@ -1603,9 +1614,13 @@ class GlitchProcessor:
     def process(self):
         package_dir = None
         clip_dir = None
-        temp_root = preferred_temp_root()
+        temp_root = self.temp_root or preferred_temp_root() or tempfile.gettempdir()
         seed = self.initialize_rng()
         self.log(f"  Render seed: {seed}")
+        if temp_root in ("/dev/shm", "/run/shm"):
+            self.log(f"  Temporary storage: RAM-backed ({temp_root})")
+        else:
+            self.log(f"  Temporary storage: disk-backed ({temp_root})")
         frame_db, brightness_db, motion_db, activity_db, color_stats = self.analyze_source_videos()
         if self.stop_requested: return
         if self.lut_path:
@@ -2559,6 +2574,31 @@ class GlitchGUI:
         self.cv = tk.Canvas(pv, width=480, height=270, bg="black"); self.cv.pack(pady=5)
         self.rv_btn = ttk.Button(pv, text="REVIEW WITH AUDIO", command=self.review_render, state=tk.DISABLED); self.rv_btn.pack(fill=tk.X)
         ttk.Label(pv, text="Click REVIEW to watch with full audio sync.", wraplength=450, justify=tk.CENTER).pack(pady=5)
+        resource_f = ttk.LabelFrame(pv, text="System Resources", padding="8")
+        resource_f.pack(fill=tk.X, pady=(6, 0))
+        resource_f.columnconfigure(1, weight=1)
+        self.resource_cpu_label = ttk.Label(resource_f, text="CPU:")
+        self.resource_cpu_label.grid(row=0, column=0, sticky="w")
+        self.resource_cpu_bar = ttk.Progressbar(resource_f, orient=tk.HORIZONTAL, mode="determinate", maximum=100)
+        self.resource_cpu_bar.grid(row=0, column=1, sticky="ew", padx=(8, 8))
+        self.resource_cpu_value = ttk.Label(resource_f, text="0.0%", width=22)
+        self.resource_cpu_value.grid(row=0, column=2, sticky="e")
+        self.resource_ram_label = ttk.Label(resource_f, text="RAM:")
+        self.resource_ram_label.grid(row=1, column=0, sticky="w")
+        self.resource_ram_bar = ttk.Progressbar(resource_f, orient=tk.HORIZONTAL, mode="determinate", maximum=100)
+        self.resource_ram_bar.grid(row=1, column=1, sticky="ew", padx=(8, 8))
+        self.resource_ram_value = ttk.Label(resource_f, text="0.0%", width=22)
+        self.resource_ram_value.grid(row=1, column=2, sticky="e")
+        self.resource_temp_label = ttk.Label(resource_f, text="Temp:")
+        self.resource_temp_label.grid(row=2, column=0, sticky="w")
+        self.resource_temp_bar = ttk.Progressbar(resource_f, orient=tk.HORIZONTAL, mode="determinate", maximum=100)
+        self.resource_temp_bar.grid(row=2, column=1, sticky="ew", padx=(8, 8))
+        self.resource_temp_value = ttk.Label(resource_f, text="0.0%", width=22)
+        self.resource_temp_value.grid(row=2, column=2, sticky="e")
+        self.resource_temp_type = ttk.Label(resource_f, text="")
+        self.resource_temp_type.grid(row=3, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self.temp_storage_root = preferred_temp_root() or tempfile.gettempdir()
+        self.init_resource_monitor()
 
         set_f = ttk.LabelFrame(m, text="Parameters", padding="10"); set_f.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
         set_f.columnconfigure(1, weight=1)
@@ -2824,6 +2864,41 @@ class GlitchGUI:
     def update_render_seed_status(self):
         if self.render_seed_status_label:
             self.render_seed_status_label.config(text="Auto" if not self.render_seed.get().strip() else "Fixed")
+    def init_resource_monitor(self):
+        self.temp_storage_root = preferred_temp_root() or tempfile.gettempdir()
+        if hasattr(psutil, "cpu_percent"):
+            psutil.cpu_percent(None)
+        self.root.after(1000, self.refresh_resource_monitor)
+    def refresh_resource_monitor(self):
+        if not self.root.winfo_exists():
+            return
+        try:
+            cpu_pct = float(psutil.cpu_percent(None))
+            mem = psutil.virtual_memory()
+            temp_root = getattr(self, "temp_storage_root", tempfile.gettempdir())
+            temp_usage = shutil.disk_usage(temp_root)
+            temp_pct = (temp_usage.used / temp_usage.total * 100.0) if temp_usage.total else 0.0
+            temp_is_ram = temp_root in ("/dev/shm", "/run/shm")
+        except Exception:
+            self.root.after(1000, self.refresh_resource_monitor)
+            return
+        if self.resource_cpu_bar:
+            self.resource_cpu_bar["value"] = max(0.0, min(100.0, cpu_pct))
+        if self.resource_cpu_value:
+            self.resource_cpu_value.config(text=f"{cpu_pct:.1f}%")
+        if self.resource_ram_bar:
+            self.resource_ram_bar["value"] = max(0.0, min(100.0, float(mem.percent)))
+        if self.resource_ram_value:
+            self.resource_ram_value.config(text=f"{mem.percent:.1f}% ({human_bytes(mem.used)} / {human_bytes(mem.total)})")
+        if self.resource_temp_bar:
+            self.resource_temp_bar["value"] = max(0.0, min(100.0, temp_pct))
+        if self.resource_temp_value:
+            self.resource_temp_value.config(
+                text=f"{temp_pct:.1f}% ({human_bytes(temp_usage.used)} / {human_bytes(temp_usage.total)})"
+            )
+        if self.resource_temp_type:
+            self.resource_temp_type.config(text=f"Temp {'RAM' if temp_is_ram else 'disk'}: {temp_root}")
+        self.root.after(1000, self.refresh_resource_monitor)
     def randomize_render_seed(self):
         self.render_seed.set(str(random.SystemRandom().randint(1, 2**63 - 1)))
     def use_last_render_seed(self):
@@ -3417,7 +3492,8 @@ class GlitchGUI:
                 self.ai_blend.get(),
                 self.verbose_match_logging.get(),
                 self.debug_match_logging.get(),
-                seed,
+                temp_root=self.temp_storage_root,
+                render_seed=seed,
             )
             self.active_processor = p
             if self.render_was_stopped:
