@@ -1955,6 +1955,7 @@ class GlitchGUI:
         self.recent_projects = self.load_recent_projects()
         self.recent_projects_menu = None
         self.render_seed_status_label = None
+        self.last_render_seed = None
         self.last_render_output_path = None
         self.last_progress_val = 0
         self.active_processor = None
@@ -2124,8 +2125,10 @@ class GlitchGUI:
         seed_copy_button.grid(row=0, column=1, padx=(5, 0))
         seed_randomize_button = ttk.Button(seed_controls, text="Randomize", command=self.randomize_render_seed)
         seed_randomize_button.grid(row=0, column=2, padx=(5, 0))
+        use_last_seed_button = ttk.Button(seed_controls, text="Use Last", command=self.use_last_render_seed)
+        use_last_seed_button.grid(row=0, column=3, padx=(5, 0))
         self.render_seed_status_label = ttk.Label(seed_controls, text="Auto", width=5)
-        self.render_seed_status_label.grid(row=0, column=3, padx=(8, 0))
+        self.render_seed_status_label.grid(row=0, column=4, padx=(8, 0))
         output_name_mode = ttk.Checkbutton(io, text="Increment if exists", variable=self.increment_output_if_exists)
         output_name_mode.grid(row=7, column=1, sticky="w")
         ttk.Label(io, text="Render length:").grid(row=8, column=0, sticky="w")
@@ -2160,6 +2163,7 @@ class GlitchGUI:
         self.add_tooltip(render_seed_entry, "Leave blank for a fresh random seed. Enter a number to reproduce the same render later.")
         self.add_tooltip(seed_copy_button, "Copy the current seed to the clipboard.")
         self.add_tooltip(seed_randomize_button, "Fill the seed field with a new random value.")
+        self.add_tooltip(use_last_seed_button, "Restore the seed from the most recent render in this session.")
         self.render_seed.trace_add("write", lambda *_: self.update_render_seed_status())
         self.update_render_seed_status()
 
@@ -2428,6 +2432,10 @@ class GlitchGUI:
             self.render_seed_status_label.config(text="Auto" if not self.render_seed.get().strip() else "Fixed")
     def randomize_render_seed(self):
         self.render_seed.set(str(random.SystemRandom().randint(1, 2**63 - 1)))
+    def use_last_render_seed(self):
+        if self.last_render_seed is None:
+            return messagebox.showinfo("Seed", "There is no previous render seed in this session yet.")
+        self.render_seed.set(str(self.last_render_seed))
     def copy_render_seed(self):
         seed = self.render_seed.get().strip()
         if not seed:
@@ -2957,6 +2965,7 @@ class GlitchGUI:
             if seed is None:
                 seed = random.SystemRandom().randint(1, 2**63 - 1)
                 self.render_seed.set(str(seed))
+            self.last_render_seed = seed
             p = GlitchProcessor(
                 self.inputs,
                 self.audio.get(),
