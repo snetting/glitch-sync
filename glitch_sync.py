@@ -394,7 +394,7 @@ def ffmpeg_concat_list_line(path):
 
 
 BUILTIN_STYLES = {
-    DEFAULT_STYLE_NAME: make_style(ai_dream_chance=0.25, ai_dream_timing="Clip"),
+    DEFAULT_STYLE_NAME: make_style(ai_dream_chance=0.25, ai_dream_timing="Clip", scene_transition_mode="Auto"),
     "Mellow Story": make_style(
         duration=0.8,
         coherence=0.85,
@@ -410,6 +410,7 @@ BUILTIN_STYLES = {
         primary_focus=0.9,
         ai_dream_chance=0.20,
         ai_dream_timing="Clip",
+        scene_transition_mode="Auto",
     ),
     "Pop Performance": make_style(
         coherence=0.65,
@@ -424,6 +425,7 @@ BUILTIN_STYLES = {
         effect_timing={"pixelate": "Random", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Random", "shake": "Frame", "ghosting": "Random", "monochrome": "Clip", "hue_shift": "Random", "vignette": "Random", "static_pan_zoom": "Clip"},
         ai_dream_chance=0.22,
         ai_dream_timing="Clip",
+        scene_transition_mode="Fast fade",
     ),
     "EDM Pulse": make_style(
         coherence=0.35,
@@ -438,6 +440,7 @@ BUILTIN_STYLES = {
         effect_timing={"pixelate": "Random", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Frame", "shake": "Frame", "ghosting": "Random", "monochrome": "Clip", "hue_shift": "Frame", "vignette": "Random", "static_pan_zoom": "Clip"},
         ai_dream_chance=0.30,
         ai_dream_timing="Clip",
+        scene_transition_mode="Hard cut",
     ),
     "Rock Punch": make_style(
         coherence=0.5,
@@ -452,6 +455,7 @@ BUILTIN_STYLES = {
         effect_timing={"pixelate": "Random", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Random", "shake": "Frame", "ghosting": "Frame", "monochrome": "Random", "hue_shift": "Clip", "vignette": "Clip", "static_pan_zoom": "Clip"},
         ai_dream_chance=0.18,
         ai_dream_timing="Clip",
+        scene_transition_mode="Fast fade",
     ),
     "Ambient Drift": make_style(
         duration=1.0,
@@ -468,6 +472,7 @@ BUILTIN_STYLES = {
         primary_focus=0.95,
         ai_dream_chance=0.65,
         ai_dream_timing="Clip",
+        scene_transition_mode="Slow fade",
     ),
     "Glitch Heavy": make_style(
         coherence=0.15,
@@ -482,6 +487,7 @@ BUILTIN_STYLES = {
         effect_timing={"pixelate": "Random", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Random", "shake": "Frame", "ghosting": "Random", "monochrome": "Clip", "hue_shift": "Random", "vignette": "Random", "static_pan_zoom": "Clip"},
         ai_dream_chance=0.24,
         ai_dream_timing="Clip",
+        scene_transition_mode="Hard cut",
     ),
 }
 
