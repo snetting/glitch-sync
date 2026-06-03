@@ -2128,19 +2128,20 @@ class GlitchProcessor:
                                 f = cv2.addWeighted(f, 1 - blend, ai_anchor, blend, 0)
                 if self.lut is not None:
                     f = apply_cube_lut(f, self.lut)
+                segment_frame = f
                 if out is not None:
                     transition_alpha = 1.0
                     if transition_in and transition_in["frames"] > 0 and frame_idx < transition_in["frames"]:
                         if transition_in["frames"] > 1:
                             transition_alpha = min(transition_alpha, frame_idx / (transition_in["frames"] - 1))
                     if transition_out and transition_out["frames"] > 0 and frame_idx >= (len(chunk) - transition_out["frames"]):
-                        if transition_out["frames"] > 1:
-                            transition_alpha = min(transition_alpha, (len(chunk) - frame_idx - 1) / (transition_out["frames"] - 1))
+                        if transition_out["frames"] > 0:
+                            transition_alpha = min(transition_alpha, (len(chunk) - frame_idx - 1) / transition_out["frames"])
                     if transition_alpha < 1.0:
                         f = cv2.convertScaleAbs(f, alpha=max(0.0, transition_alpha), beta=0)
                     out.write(f)
                 if segment_writer is not None:
-                    segment_writer.write(f)
+                    segment_writer.write(segment_frame)
                 prev_f = f.copy()
 
             if segment_writer is not None:
@@ -2707,7 +2708,7 @@ class GlitchGUI:
         right_top.rowconfigure(1, weight=0)
         right_top.rowconfigure(2, weight=0)
         pv = ttk.LabelFrame(right_top, text="Live Preview & Review", padding="8"); pv.grid(row=0, column=0, sticky="ew")
-        self.cv = tk.Canvas(pv, width=480, height=150, bg="black"); self.cv.pack(pady=(2, 4), fill=tk.X)
+        self.cv = tk.Canvas(pv, width=480, height=220, bg="black"); self.cv.pack(pady=(2, 4), fill=tk.X)
         self.rv_btn = ttk.Button(pv, text="REVIEW WITH AUDIO", command=self.review_render, state=tk.DISABLED); self.rv_btn.pack(fill=tk.X)
         ttk.Label(pv, text="Click REVIEW to watch with full audio sync.", wraplength=430, justify=tk.CENTER).pack(pady=(4, 2))
         resource_f = ttk.LabelFrame(right_top, text="System Resources", padding="6")
@@ -3731,7 +3732,7 @@ class GlitchGUI:
     def display_frame(self, f):
         h, w = f.shape[:2]
         canvas_w = max(1, int(self.cv.winfo_width() or self.cv.winfo_reqwidth() or 480))
-        canvas_h = max(1, int(self.cv.winfo_height() or self.cv.winfo_reqheight() or 160))
+        canvas_h = max(1, int(self.cv.winfo_height() or self.cv.winfo_reqheight() or 220))
         s = min(canvas_w / max(w, 1), canvas_h / max(h, 1))
         nw, nh = max(1, int(w * s)), max(1, int(h * s))
         img = Image.fromarray(cv2.cvtColor(f, cv2.COLOR_BGR2RGB)).resize((nw, nh), Image.LANCZOS)
