@@ -1498,7 +1498,7 @@ class GlitchProcessor:
                 match_brightness_total += float(np.clip(1.0 - brightness_error, 0, 1))
                 match_activity_total += float(np.clip(1.0 - activity_error, 0, 1))
                 match_segments += 1
-                if match_segments <= 5 or ((i + 1) % 10 == 0) or (i + 1 == len(cut_times)):
+                if self.verbose_match_logging:
                     self.log(
                         f"  Match {i + 1}/{len(cut_times)}: quality {segment_quality:.2f} "
                         f"(brightness {selected_brightness:.2f}/{target_brightness_norm:.2f}, "
@@ -1756,6 +1756,7 @@ class GlitchGUI:
         self.output_resolution_label = tk.StringVar(value="Auto (first input)")
         self.export_quality_label = tk.StringVar(value="High quality (slower)")
         self.increment_output_if_exists = tk.BooleanVar(value=False)
+        self.verbose_match_logging = tk.BooleanVar(value=False)
         self.experimental_mode = tk.BooleanVar(value=False)
         self.ai_panel_visible = self.experimental_mode
         self.ai_dream_chance = tk.DoubleVar(value=0.25)
@@ -1990,8 +1991,10 @@ class GlitchGUI:
         ttk.Button(set_f, text="Load Style", command=self.load_named_style).grid(row=10, column=2, sticky="ew")
         ttk.Button(set_f, text="Auto Style", command=self.auto_style).grid(row=11, column=1, sticky="ew")
         ttk.Button(set_f, text="Delete Style", command=self.delete_named_style).grid(row=11, column=2, sticky="ew")
+        verbose_match_cb = ttk.Checkbutton(set_f, text="Verbose match logging", variable=self.verbose_match_logging)
+        verbose_match_cb.grid(row=12, column=0, sticky="w")
         self.ai_frame = ttk.LabelFrame(set_f, text="Experimental AI Stylization", padding="10")
-        self.ai_frame.grid(row=12, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        self.ai_frame.grid(row=13, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         self.ai_frame.columnconfigure(1, weight=1)
         ttk.Label(self.ai_frame, text="AI stylization is enabled from the Effects panel.").grid(row=0, column=0, columnspan=2, sticky="w")
         ttk.Label(self.ai_frame, text="Easy Diffusion URL:").grid(row=1, column=0, sticky="w")
@@ -2076,6 +2079,7 @@ class GlitchGUI:
         self.add_tooltip(style_name_entry, "Enter a name before saving a custom style.")
         self.add_tooltip(load_style_label, "Choose a saved style to restore a preset configuration.")
         self.add_tooltip(self.style_combo, "Select a built-in or saved style.")
+        self.add_tooltip(verbose_match_cb, "Show every segment match in the log instead of only the final summary.")
 
         fx = ttk.LabelFrame(m, text="Effects", padding="10"); fx.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
         fx.columnconfigure(1, weight=1)
@@ -2243,6 +2247,7 @@ class GlitchGUI:
             "output_resolution_label": self.output_resolution_label.get(),
             "export_quality_label": self.export_quality_label.get(),
             "increment_output_if_exists": self.increment_output_if_exists.get(),
+            "verbose_match_logging": self.verbose_match_logging.get(),
             "experimental_mode": self.experimental_mode.get(),
             "ai_dream_chance": self.ai_dream_chance.get(),
             "ai_dream_timing": self.ai_dream_timing.get(),
@@ -2425,6 +2430,7 @@ class GlitchGUI:
             else "High quality (slower)"
         )
         self.increment_output_if_exists.set(settings.get("increment_output_if_exists", self.increment_output_if_exists.get()))
+        self.verbose_match_logging.set(settings.get("verbose_match_logging", self.verbose_match_logging.get()))
         experimental_mode = settings.get("experimental_mode")
         if experimental_mode is None:
             experimental_mode = settings.get("ai_panel_visible", self.experimental_mode.get())
