@@ -89,7 +89,7 @@ ANALYSIS_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "glitchsync
 STATIC_MOTION_THRESHOLD = 0.018
 LAB_EPSILON = 1e-6
 AI_DEFAULT_BACKEND_URL = "http://127.0.0.1:9000"
-AI_DEFAULT_PROMPT = "hand drawn illustration, expressive linework"
+AI_DEFAULT_PROMPT = "dreamlike img2img transformation of the input image, preserve the original subject and composition, and reimagine it as a surreal cinematic dream scene with soft painterly detail"
 AI_DEFAULT_NEGATIVE_PROMPT = "blurry, low quality, watermark, text"
 AI_DEFAULT_EVERY_N_FRAMES = 12
 AI_DEFAULT_DENOISE = 0.32
@@ -102,6 +102,9 @@ AI_DEFAULT_MODEL_FALLBACK = "sd-v1-4"
 AI_OBSOLETE_NEGATIVE_PROMPTS = {
     "blurry, low quality, watermark, text, deformed, extra fingers",
     "blurry, low quality, watermark, text, deformed",
+}
+AI_OBSOLETE_PROMPTS = {
+    "hand drawn illustration, expressive linework",
 }
 
 
@@ -292,7 +295,7 @@ def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=T
                color_match_enabled=False, color_match_strength=0.5,
                output_resolution_label="Auto (first input)",
                export_quality_label="High quality (slower)", render_mode="Full",
-               snippet_duration=30.0, lut_path=""):
+               snippet_duration=30.0, lut_path="", ai_dream_chance=0.25):
     return {
         "export_mode_label": export_mode_label,
         "output_resolution_label": output_resolution_label,
@@ -334,11 +337,12 @@ def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=T
         },
         "primary_enabled": primary_enabled,
         "primary_focus": primary_focus,
+        "ai_dream_chance": ai_dream_chance,
     }
 
 
 BUILTIN_STYLES = {
-    DEFAULT_STYLE_NAME: make_style(),
+    DEFAULT_STYLE_NAME: make_style(ai_dream_chance=0.25),
     "Mellow Story": make_style(
         duration=0.8,
         coherence=0.85,
@@ -352,6 +356,7 @@ BUILTIN_STYLES = {
         effect_amounts={"pixelate": 0.25, "flash": 0.18, "rewind": 0.1, "rgb_shift": 0.2, "shake": 0.15, "ghosting": 0.7, "monochrome": 0.28, "hue_shift": 0.0, "vignette": 0.35, "static_pan_zoom": 0.45},
         effect_timing={"pixelate": "Clip", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Clip", "shake": "Clip", "ghosting": "Clip", "monochrome": "Clip", "hue_shift": "Clip", "vignette": "Clip", "static_pan_zoom": "Clip"},
         primary_focus=0.9,
+        ai_dream_chance=0.20,
     ),
     "Pop Performance": make_style(
         coherence=0.65,
@@ -364,6 +369,7 @@ BUILTIN_STYLES = {
         effects_enabled={"hue_shift": True, "vignette": True},
         effect_amounts={"pixelate": 0.5, "flash": 0.55, "rewind": 0.2, "rgb_shift": 0.65, "shake": 0.45, "ghosting": 0.5, "monochrome": 0.0, "hue_shift": 0.22, "vignette": 0.25, "static_pan_zoom": 0.35},
         effect_timing={"pixelate": "Random", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Random", "shake": "Frame", "ghosting": "Random", "monochrome": "Clip", "hue_shift": "Random", "vignette": "Random", "static_pan_zoom": "Clip"},
+        ai_dream_chance=0.22,
     ),
     "EDM Pulse": make_style(
         coherence=0.35,
@@ -376,6 +382,7 @@ BUILTIN_STYLES = {
         effects_enabled={"hue_shift": True, "vignette": True},
         effect_amounts={"pixelate": 1.2, "flash": 1.25, "rewind": 0.45, "rgb_shift": 1.25, "shake": 1.1, "ghosting": 0.65, "monochrome": 0.0, "hue_shift": 0.75, "vignette": 0.45, "static_pan_zoom": 0.25},
         effect_timing={"pixelate": "Random", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Frame", "shake": "Frame", "ghosting": "Random", "monochrome": "Clip", "hue_shift": "Frame", "vignette": "Random", "static_pan_zoom": "Clip"},
+        ai_dream_chance=0.30,
     ),
     "Rock Punch": make_style(
         coherence=0.5,
@@ -388,6 +395,7 @@ BUILTIN_STYLES = {
         effects_enabled={"monochrome": True, "vignette": True},
         effect_amounts={"pixelate": 0.65, "flash": 0.6, "rewind": 0.25, "rgb_shift": 0.65, "shake": 1.25, "ghosting": 0.35, "monochrome": 0.25, "hue_shift": 0.0, "vignette": 0.55, "static_pan_zoom": 0.25},
         effect_timing={"pixelate": "Random", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Random", "shake": "Frame", "ghosting": "Frame", "monochrome": "Random", "hue_shift": "Clip", "vignette": "Clip", "static_pan_zoom": "Clip"},
+        ai_dream_chance=0.18,
     ),
     "Ambient Drift": make_style(
         duration=1.0,
@@ -402,6 +410,7 @@ BUILTIN_STYLES = {
         effect_amounts={"pixelate": 0.0, "flash": 0.1, "rewind": 0.0, "rgb_shift": 0.12, "shake": 0.0, "ghosting": 1.2, "monochrome": 0.35, "hue_shift": 0.0, "vignette": 0.3, "static_pan_zoom": 0.75},
         effect_timing={"pixelate": "Clip", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Clip", "shake": "Clip", "ghosting": "Clip", "monochrome": "Clip", "hue_shift": "Clip", "vignette": "Clip", "static_pan_zoom": "Clip"},
         primary_focus=0.95,
+        ai_dream_chance=0.65,
     ),
     "Glitch Heavy": make_style(
         coherence=0.15,
@@ -414,6 +423,7 @@ BUILTIN_STYLES = {
         effects_enabled={"hue_shift": True, "vignette": True},
         effect_amounts={"pixelate": 1.7, "flash": 1.15, "rewind": 0.8, "rgb_shift": 1.8, "shake": 1.4, "ghosting": 1.0, "monochrome": 0.0, "hue_shift": 0.9, "vignette": 0.65, "static_pan_zoom": 0.2},
         effect_timing={"pixelate": "Random", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Random", "shake": "Frame", "ghosting": "Random", "monochrome": "Clip", "hue_shift": "Random", "vignette": "Random", "static_pan_zoom": "Clip"},
+        ai_dream_chance=0.24,
     ),
 }
 
@@ -713,6 +723,7 @@ class GlitchProcessor:
                  lut_path="", output_resolution=None, export_quality_label="High quality (slower)",
                  effect_timing=None,
                  experimental_mode=False,
+                 ai_dream_chance=0.25,
                  ai_enabled=False, ai_segment_anchor_only=True, ai_backend_url=AI_DEFAULT_BACKEND_URL,
                  ai_prompt=AI_DEFAULT_PROMPT, ai_negative_prompt=AI_DEFAULT_NEGATIVE_PROMPT,
                  ai_every_n_frames=AI_DEFAULT_EVERY_N_FRAMES, ai_denoise=AI_DEFAULT_DENOISE,
@@ -738,6 +749,7 @@ class GlitchProcessor:
         self.output_resolution = output_resolution
         self.export_quality_label = export_quality_label
         self.experimental_mode = bool(experimental_mode)
+        self.ai_dream_chance = float(np.clip(ai_dream_chance, 0.0, 1.0))
         self.ai_enabled = bool(ai_enabled)
         self.ai_segment_anchor_only = bool(ai_segment_anchor_only)
         self.ai_backend_url = ai_backend_url.strip()
@@ -792,6 +804,12 @@ class GlitchProcessor:
 
     def ai_stylization_active(self):
         return self.experimental_mode and self.ai_enabled and bool(self.ai_backend_url) and bool(self.ai_prompt)
+
+    def ai_segment_probability(self, clip_rms):
+        base = float(np.clip(self.ai_dream_chance, 0.0, 1.0))
+        quietness = float(np.clip(1.0 - clip_rms, 0.0, 1.0))
+        boosted = base + ((1.0 - base) * quietness * 0.75)
+        return float(np.clip(boosted, 0.0, 1.0))
 
     def ai_backend_base_url(self):
         return self.ai_backend_url.rstrip("/")
@@ -1438,6 +1456,10 @@ class GlitchProcessor:
                 flash_decay_until = -1
                 flash_peak = 0.0
                 segment_frames = []
+                ai_segment_active = (
+                    self.ai_stylization_active()
+                    and random.random() < self.ai_segment_probability(clip_rms)
+                )
                 ai_anchor = None
                 ai_anchor_frame_idx = -1
                 for frame_idx, f in enumerate(chunk):
@@ -1493,7 +1515,7 @@ class GlitchProcessor:
                         f = apply_hue_shift(f, hue_shift_highs, self.sensitivity, hue_shift_amount)
                     if self.vignette and vignette_amount > 0:
                         f = apply_vignette(f, vignette_bass, self.sensitivity, vignette_amount)
-                    if self.ai_stylization_active():
+                    if ai_segment_active:
                         if self.ai_segment_anchor_only:
                             if ai_anchor is None:
                                 ai_anchor, ai_ok = self.ai_render_frame(f)
@@ -1646,6 +1668,8 @@ class GlitchGUI:
         self.increment_output_if_exists = tk.BooleanVar(value=False)
         self.experimental_mode = tk.BooleanVar(value=False)
         self.ai_panel_visible = self.experimental_mode
+        self.ai_dream_chance = tk.DoubleVar(value=0.25)
+        self.ai_dream_chance_label = None
         self.ai_enabled = tk.BooleanVar(value=False)
         self.ai_segment_anchor_only = tk.BooleanVar(value=True)
         self.ai_backend_url = tk.StringVar(value=AI_DEFAULT_BACKEND_URL)
@@ -1876,6 +1900,15 @@ class GlitchGUI:
         ttk.Button(set_f, text="Load Style", command=self.load_named_style).grid(row=10, column=2, sticky="ew")
         ttk.Button(set_f, text="Auto Style", command=self.auto_style).grid(row=11, column=1, sticky="ew")
         ttk.Button(set_f, text="Delete Style", command=self.delete_named_style).grid(row=11, column=2, sticky="ew")
+        ai_dream_label = ttk.Label(set_f, text="AI dream chance:")
+        ai_dream_label.grid(row=12, column=0)
+        ai_dream_controls = ttk.Frame(set_f)
+        ai_dream_controls.grid(row=12, column=1, sticky="ew")
+        ai_dream_controls.columnconfigure(0, weight=1)
+        ai_dream_scale = ttk.Scale(ai_dream_controls, from_=0.0, to=1.0, variable=self.ai_dream_chance, command=lambda e: self.update_ai_dream_chance_label())
+        ai_dream_scale.grid(row=0, column=0, sticky="ew")
+        self.ai_dream_chance_label = ttk.Label(ai_dream_controls, text=f"{self.ai_dream_chance.get():.2f}", width=5)
+        self.ai_dream_chance_label.grid(row=0, column=1, sticky="w", padx=(8, 0))
         self.ai_frame = ttk.LabelFrame(set_f, text="Experimental AI Stylization", padding="10")
         self.ai_frame.grid(row=13, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         self.ai_frame.columnconfigure(1, weight=1)
@@ -1962,6 +1995,8 @@ class GlitchGUI:
         self.add_tooltip(style_name_entry, "Enter a name before saving a custom style.")
         self.add_tooltip(load_style_label, "Choose a saved style to restore a preset configuration.")
         self.add_tooltip(self.style_combo, "Select a built-in or saved style.")
+        self.add_tooltip(ai_dream_label, "Probability that a clip gets AI stylization, with quieter sections favored automatically.")
+        self.add_tooltip(ai_dream_scale, "Higher values make AI more likely to appear on a clip; quieter clips get a stronger boost.")
 
         fx = ttk.LabelFrame(m, text="Effects", padding="10"); fx.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
         fx.columnconfigure(1, weight=1)
@@ -2037,6 +2072,9 @@ class GlitchGUI:
     def update_ai_blend_label(self):
         if self.ai_blend_label:
             self.ai_blend_label.config(text=f"{self.ai_blend.get():.2f}")
+    def update_ai_dream_chance_label(self):
+        if self.ai_dream_chance_label:
+            self.ai_dream_chance_label.config(text=f"{self.ai_dream_chance.get():.2f}")
     def load_styles_file(self):
         try:
             with open(STYLE_CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -2052,9 +2090,19 @@ class GlitchGUI:
         if not isinstance(settings, dict):
             return settings
         ai_negative_prompt = settings.get("ai_negative_prompt")
-        if isinstance(ai_negative_prompt, str) and ai_negative_prompt.strip().rstrip(",") in AI_OBSOLETE_NEGATIVE_PROMPTS:
+        ai_prompt = settings.get("ai_prompt")
+        if (
+            isinstance(ai_negative_prompt, str)
+            and ai_negative_prompt.strip().rstrip(",") in AI_OBSOLETE_NEGATIVE_PROMPTS
+        ) or (
+            isinstance(ai_prompt, str)
+            and ai_prompt.strip().rstrip(",") in AI_OBSOLETE_PROMPTS
+        ):
             settings = dict(settings)
-            settings["ai_negative_prompt"] = AI_DEFAULT_NEGATIVE_PROMPT
+            if isinstance(ai_negative_prompt, str) and ai_negative_prompt.strip().rstrip(",") in AI_OBSOLETE_NEGATIVE_PROMPTS:
+                settings["ai_negative_prompt"] = AI_DEFAULT_NEGATIVE_PROMPT
+            if isinstance(ai_prompt, str) and ai_prompt.strip().rstrip(",") in AI_OBSOLETE_PROMPTS:
+                settings["ai_prompt"] = AI_DEFAULT_PROMPT
         return settings
     def with_builtin_styles(self, styles):
         deleted = set(styles.get("_deleted_builtin_styles", []))
@@ -2089,6 +2137,7 @@ class GlitchGUI:
             "export_quality_label": self.export_quality_label.get(),
             "increment_output_if_exists": self.increment_output_if_exists.get(),
             "experimental_mode": self.experimental_mode.get(),
+            "ai_dream_chance": self.ai_dream_chance.get(),
             "ai_panel_visible": self.ai_panel_visible.get(),
             "ai_enabled": self.ai_enabled.get(),
             "ai_segment_anchor_only": self.ai_segment_anchor_only.get(),
@@ -2273,6 +2322,7 @@ class GlitchGUI:
             experimental_mode = settings.get("ai_panel_visible", self.experimental_mode.get())
         self.experimental_mode.set(bool(experimental_mode))
         self.ai_panel_visible.set(self.experimental_mode.get())
+        self.ai_dream_chance.set(settings.get("ai_dream_chance", self.ai_dream_chance.get()))
         self.ai_enabled.set(settings.get("ai_enabled", self.ai_enabled.get()) if self.experimental_mode.get() else False)
         self.ai_segment_anchor_only.set(settings.get("ai_segment_anchor_only", self.ai_segment_anchor_only.get()))
         self.ai_backend_url.set(settings.get("ai_backend_url", self.ai_backend_url.get()))
@@ -2332,6 +2382,7 @@ class GlitchGUI:
         self.update_ai_denoise_label()
         self.update_ai_cfg_scale_label()
         self.update_ai_blend_label()
+        self.update_ai_dream_chance_label()
         self.update_primary_focus_label()
         self.toggle_experimental_mode()
     def save_named_style(self):
@@ -2568,6 +2619,7 @@ class GlitchGUI:
                 self.export_quality_label.get(),
                 effect_timing,
                 self.experimental_mode.get(),
+                self.ai_dream_chance.get(),
                 self.ai_enabled.get(),
                 self.ai_segment_anchor_only.get(),
                 self.ai_backend_url.get(),
