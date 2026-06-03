@@ -84,7 +84,7 @@ DEFAULT_EFFECT_TIMING = {
 }
 DEFAULT_STYLE_NAME = "Default"
 STYLE_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".glitchsync_styles.json")
-ANALYSIS_CACHE_VERSION = "4"
+ANALYSIS_CACHE_VERSION = "6"
 ANALYSIS_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "glitchsync", "analysis")
 STATIC_MOTION_THRESHOLD = 0.018
 LAB_EPSILON = 1e-6
@@ -1018,19 +1018,19 @@ class GlitchProcessor:
                 best_name, best_score = name, score
         return best_name, desc
 
-    def choose_candidate(self, candidates, source_use_counts=None, motion_db=None,
-                         target_motion=None, frame_count=1, motion_scale=1.0):
+    def choose_candidate(self, candidates, source_use_counts=None, activity_db=None,
+                         target_activity=None, frame_count=1, activity_scale=1.0):
         if not candidates:
             return None
         diversity_strength = self.source_variety if self.source_variety > 0 else (0.35 if len(self.inputs) == 1 else 0.0)
         use_variety = bool(source_use_counts) and diversity_strength > 0
-        use_motion = (
-            motion_db is not None
-            and target_motion is not None
+        use_activity = (
+            activity_db is not None
+            and target_activity is not None
             and self.music_match > 0
-            and motion_scale > 0
+            and activity_scale > 0
         )
-        if not use_variety and not use_motion:
+        if not use_variety and not use_activity:
             return random.choice(candidates)
         max_count = max(source_use_counts) if source_use_counts else 0
         weights = []
@@ -1049,10 +1049,10 @@ class GlitchProcessor:
                     spread = max(1.0, frame_count * (8.0 + (diversity_strength * 24.0)))
                     separation = np.clip(nearest / spread, 0, 1)
                     weight *= 0.25 + (0.75 * (separation ** (0.7 + (diversity_strength * 1.5))))
-            if use_motion:
-                motion = self.segment_motion_score(motion_db, v_idx, f_idx, frame_count)
-                motion_norm = np.clip(motion / motion_scale, 0, 1)
-                closeness = 1.0 - abs(motion_norm - target_motion)
+            if use_activity:
+                activity = self.segment_motion_score(activity_db, v_idx, f_idx, frame_count)
+                activity_norm = np.clip(activity / activity_scale, 0, 1)
+                closeness = 1.0 - abs(activity_norm - target_activity)
                 weight *= max(0.05, 1.0 + (self.music_match * 5.0 * closeness))
             weights.append(weight)
         return random.choices(candidates, weights=weights, k=1)[0]
@@ -1108,6 +1108,7 @@ class GlitchProcessor:
         self.log(f"  Scanning {os.path.basename(path)}...")
         buckets = [[] for _ in range(256)]
         motion_scores = []
+        activity_scores = []
         lab_sum = np.zeros(3, dtype=np.float64)
         lab_sq_sum = np.zeros(3, dtype=np.float64)
         lab_pixels = 0
@@ -1127,6 +1128,24 @@ class GlitchProcessor:
                 sample = cv2.resize(gray, (160, 90), interpolation=cv2.INTER_AREA)
                 motion = 0.0 if prev_sample is None else float(np.mean(cv2.absdiff(sample, prev_sample)) / 255.0)
                 motion_scores.append((frame_count, motion))
+                if prev_sample is None:
+                    flow = 0.0
+                else:
+                    flow_field = cv2.calcOpticalFlowFarneback(
+                        prev_sample,
+                        sample,
+                        None,
+                        pyr_scale=0.5,
+                        levels=3,
+                        winsize=15,
+                        iterations=3,
+                        poly_n=5,
+                        poly_sigma=1.2,
+                        flags=0,
+                    )
+                    flow_mag, _ = cv2.cartToPolar(flow_field[..., 0], flow_field[..., 1])
+                    flow = float(np.mean(flow_mag))
+                activity_scores.append((frame_count, motion, flow))
                 prev_sample = sample
                 lab_sample = cv2.cvtColor(cv2.resize(frame, (160, 90), interpolation=cv2.INTER_AREA), cv2.COLOR_BGR2LAB).astype(np.float32)
                 lab_sum += np.sum(lab_sample, axis=(0, 1))
@@ -1140,9 +1159,24 @@ class GlitchProcessor:
         else:
             lab_mean = np.array([128.0, 128.0, 128.0])
             lab_std = np.array([1.0, 1.0, 1.0])
+        if activity_scores:
+            motion_vals = np.array([motion for _, motion, _ in activity_scores], dtype=np.float32)
+            flow_vals = np.array([flow for _, _, flow in activity_scores], dtype=np.float32)
+            motion_scale = max(float(np.percentile(motion_vals, 95)), LAB_EPSILON)
+            flow_scale = max(float(np.percentile(flow_vals, 95)), LAB_EPSILON)
+            activity_scores = [
+                (
+                    frame_idx,
+                    float(np.clip(motion / motion_scale, 0, 1)),
+                    float(np.clip(flow / flow_scale, 0, 1)),
+                    float(np.clip(((motion / motion_scale) * 0.55) + ((flow / flow_scale) * 0.45), 0, 1)),
+                )
+                for frame_idx, motion, flow in activity_scores
+            ]
         video_analysis = {
             "buckets": buckets,
             "motion_scores": motion_scores,
+            "activity_scores": activity_scores,
             "color_stats": {
                 "lab_mean": lab_mean.tolist(),
                 "lab_std": lab_std.tolist(),
@@ -1164,19 +1198,25 @@ class GlitchProcessor:
         if self.progress_callback: self.progress_callback(-1, -1)
         frame_db = {i: [] for i in range(256)}
         motion_db = {}
+        activity_db = {}
         color_stats = {}
         for video_idx, path in enumerate(self.inputs):
             video_analysis = self.analyze_video_file(path)
             buckets = video_analysis["buckets"]
             motion_scores = video_analysis.get("motion_scores", [])
+            activity_scores = video_analysis.get("activity_scores", [])
             motion_db[video_idx] = (
                 [frame for frame, _ in motion_scores],
                 [score for _, score in motion_scores],
             )
+            activity_db[video_idx] = (
+                [frame for frame, _, _, _ in activity_scores],
+                [score for _, _, _, score in activity_scores],
+            )
             color_stats[video_idx] = video_analysis.get("color_stats")
             for brightness, frames in enumerate(buckets):
                 frame_db[brightness].extend((video_idx, frame_idx) for frame_idx in frames)
-        return frame_db, motion_db, color_stats
+        return frame_db, motion_db, activity_db, color_stats
 
     def analyze_audio_file(self):
         cache_path = analysis_cache_path(self.audio, "audio", "npz")
@@ -1238,7 +1278,7 @@ class GlitchProcessor:
         }
 
     def find_best_match(self, target_b, frame_db, current_vid_idx, source_use_counts=None,
-                        motion_db=None, target_motion=None, frame_count=1, motion_scale=1.0,
+                        activity_db=None, target_activity=None, frame_count=1, activity_scale=1.0,
                         source_streak=0):
         search_range = 8
         candidates_current, candidates_other, candidates_primary = [], [], []
@@ -1249,14 +1289,14 @@ class GlitchProcessor:
                 if v_idx == current_vid_idx: candidates_current.append((v_idx, f_idx))
                 else: candidates_other.append((v_idx, f_idx))
         if candidates_primary and random.random() < self.primary_focus:
-            return self.choose_candidate(candidates_primary, source_use_counts, motion_db, target_motion, frame_count, motion_scale)
+            return self.choose_candidate(candidates_primary, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
         if source_streak >= 5 and candidates_other:
             self.log(
                 f"  Source lock detected after {source_streak} same-source segments; "
                 f"forcing an alternate source near brightness {target_b} "
                 f"({len(candidates_current)} current / {len(candidates_other)} alternate candidates)."
             )
-            return self.choose_candidate(candidates_other, source_use_counts, motion_db, target_motion, frame_count, motion_scale)
+            return self.choose_candidate(candidates_other, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
         if source_streak >= 5 and candidates_current and not candidates_other:
             self.log(
                 f"  Source lock detected after {source_streak} same-source segments; "
@@ -1264,9 +1304,9 @@ class GlitchProcessor:
                 f"({len(candidates_current)} current / 0 alternate candidates)."
             )
         if candidates_current and (random.random() < self.coherence or not candidates_other):
-            return self.choose_candidate(candidates_current, source_use_counts, motion_db, target_motion, frame_count, motion_scale)
+            return self.choose_candidate(candidates_current, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
         if candidates_other:
-            return self.choose_candidate(candidates_other, source_use_counts, motion_db, target_motion, frame_count, motion_scale)
+            return self.choose_candidate(candidates_other, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
         offset = 1
         while offset < 256:
             low, high = target_b - offset, target_b + offset
@@ -1277,9 +1317,9 @@ class GlitchProcessor:
             if self.use_primary_video():
                 primary_fallback = [item for item in fallback if item[0] == self.primary_video_idx]
                 if primary_fallback and random.random() < self.primary_focus:
-                    return self.choose_candidate(primary_fallback, source_use_counts, motion_db, target_motion, frame_count, motion_scale)
+                    return self.choose_candidate(primary_fallback, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
             if fallback:
-                return self.choose_candidate(fallback, source_use_counts, motion_db, target_motion, frame_count, motion_scale)
+                return self.choose_candidate(fallback, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
             offset += 1
         return None
 
@@ -1310,7 +1350,7 @@ class GlitchProcessor:
     def process(self):
         package_dir = None
         clip_dir = None
-        frame_db, motion_db, color_stats = self.analyze_source_videos()
+        frame_db, motion_db, activity_db, color_stats = self.analyze_source_videos()
         if self.stop_requested: return
         if self.lut_path:
             self.load_lut()
@@ -1374,6 +1414,7 @@ class GlitchProcessor:
         source_use_counts = [0 for _ in self.inputs]
         reference_stats = color_stats.get(self.color_reference_idx) if self.color_reference_idx is not None else None
         motion_scale = self.motion_scale(motion_db)
+        activity_scale = self.motion_scale(activity_db)
         segments = []
         rendered_frames = 0
         source_streak = 0
@@ -1405,17 +1446,17 @@ class GlitchProcessor:
             clip_mids = norm_range(mids_energy, max_mids, t_start, clip_end)
             music_energy = np.clip((clip_rms * 0.55) + (clip_bass * 0.30) + (clip_highs * 0.15), 0, 1)
             target_brightness = int(np.clip(((1 - self.music_match) * curr_rms) + (self.music_match * music_energy), 0, 1) * 255)
-            target_motion = np.clip((clip_rms * 0.45) + (clip_bass * 0.40) + (clip_highs * 0.15), 0, 1)
+            target_activity = np.clip((clip_rms * 0.45) + (clip_bass * 0.40) + (clip_highs * 0.15), 0, 1)
             
             match = self.find_best_match(
                 target_brightness,
                 frame_db,
                 self.current_vid_idx,
                 source_use_counts,
-                motion_db,
-                target_motion,
+                activity_db,
+                target_activity,
                 num_frames,
-                motion_scale,
+                activity_scale,
                 source_streak,
             )
             if match:
