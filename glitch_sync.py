@@ -2024,7 +2024,7 @@ class GlitchGUI:
             timing_var=self.ai_dream_timing,
             timing_values=AI_DREAM_TIMING_LABELS,
         )
-        self.ai_dream_row_widgets = (ai_dream_label, ai_dream_scale, ai_dream_timing)
+        self.ai_dream_row_widgets = (ai_dream_label, ai_dream_scale, self.effect_amount_labels["ai_dream_chance"], ai_dream_timing)
         self.add_tooltip(ai_dream_label, "Probability that a clip gets AI stylization, with quieter sections favored automatically.")
         self.add_tooltip(ai_dream_scale, "Higher values make AI more likely to appear on a clip; quieter clips get a stronger boost.")
         self.add_tooltip(ai_dream_timing, "Clip biases the chance upward in quieter clips. Random uses the base chance unchanged, regardless of audio energy.")
