@@ -17,6 +17,7 @@ import bisect
 import base64
 import io
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import deque
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
@@ -1287,7 +1288,13 @@ class GlitchProcessor:
             selected = [beat_times[0], beat_times[-1]]
         return np.array(selected)
 
-    def analyze_video_file(self, path):
+    def analyze_video_file(self, path, emit_log=True, emit_frame_callback=True):
+        messages = []
+        def log(msg):
+            if emit_log:
+                self.log(msg)
+            else:
+                messages.append(msg)
         cache_path = analysis_cache_path(path, "video", "pkl")
         if os.path.exists(cache_path):
             try:
@@ -1300,12 +1307,12 @@ class GlitchProcessor:
                     and "brightness_scores" in cached
                     and "color_stats" in cached
                 ):
-                    self.log(f"  Using cached index for {os.path.basename(path)}")
-                    return cached
+                    log(f"  Using cached index for {os.path.basename(path)}")
+                    return cached, messages
             except Exception as e:
-                self.log(f"  Ignoring video cache for {os.path.basename(path)}: {e}")
+                log(f"  Ignoring video cache for {os.path.basename(path)}: {e}")
 
-        self.log(f"  Scanning {os.path.basename(path)}...")
+        log(f"  Scanning {os.path.basename(path)}...")
         buckets = [[] for _ in range(256)]
         brightness_scores = []
         motion_scores = []
@@ -1319,7 +1326,7 @@ class GlitchProcessor:
         while not self.stop_requested:
             ret, frame = cap.read()
             if not ret: break
-            if self.frame_callback and frame_count % 120 == 0:
+            if emit_frame_callback and self.frame_callback and frame_count % 120 == 0:
                 self.frame_callback(frame)
             if frame_count % 5 == 0:
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -1391,10 +1398,10 @@ class GlitchProcessor:
                 os.makedirs(os.path.dirname(cache_path), exist_ok=True)
                 with open(cache_path, "wb") as f:
                     pickle.dump(video_analysis, f, protocol=pickle.HIGHEST_PROTOCOL)
-                self.log(f"  Cached index for {os.path.basename(path)}")
+                log(f"  Cached index for {os.path.basename(path)}")
             except Exception as e:
-                self.log(f"  Could not save video cache for {os.path.basename(path)}: {e}")
-        return video_analysis
+                log(f"  Could not save video cache for {os.path.basename(path)}: {e}")
+        return video_analysis, messages
 
     def analyze_source_videos(self):
         self.log("Indexing video frames...")
@@ -1404,27 +1411,42 @@ class GlitchProcessor:
         motion_db = {}
         activity_db = {}
         color_stats = {}
-        for video_idx, path in enumerate(self.inputs):
-            video_analysis = self.analyze_video_file(path)
-            buckets = video_analysis["buckets"]
-            brightness_scores = video_analysis.get("brightness_scores", [])
-            motion_scores = video_analysis.get("motion_scores", [])
-            activity_scores = video_analysis.get("activity_scores", [])
-            brightness_db[video_idx] = (
-                [frame for frame, _ in brightness_scores],
-                [score for _, score in brightness_scores],
-            )
-            motion_db[video_idx] = (
-                [frame for frame, _ in motion_scores],
-                [score for _, score in motion_scores],
-            )
-            activity_db[video_idx] = (
-                [frame for frame, _, _, _ in activity_scores],
-                [score for _, _, _, score in activity_scores],
-            )
-            color_stats[video_idx] = video_analysis.get("color_stats")
-            for brightness, frames in enumerate(buckets):
-                frame_db[brightness].extend((video_idx, frame_idx) for frame_idx in frames)
+        worker_count = min(max(1, os.cpu_count() or 1), max(1, min(len(self.inputs), 4)))
+        if worker_count > 1:
+            self.log(f"  Parallel indexing with {worker_count} workers...")
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = {
+                executor.submit(self.analyze_video_file, path, False, False): video_idx
+                for video_idx, path in enumerate(self.inputs)
+            }
+            completed = 0
+            for future in as_completed(futures):
+                video_idx = futures[future]
+                video_analysis, messages = future.result()
+                for msg in messages:
+                    self.log(msg)
+                buckets = video_analysis["buckets"]
+                brightness_scores = video_analysis.get("brightness_scores", [])
+                motion_scores = video_analysis.get("motion_scores", [])
+                activity_scores = video_analysis.get("activity_scores", [])
+                brightness_db[video_idx] = (
+                    [frame for frame, _ in brightness_scores],
+                    [score for _, score in brightness_scores],
+                )
+                motion_db[video_idx] = (
+                    [frame for frame, _ in motion_scores],
+                    [score for _, score in motion_scores],
+                )
+                activity_db[video_idx] = (
+                    [frame for frame, _, _, _ in activity_scores],
+                    [score for _, _, _, score in activity_scores],
+                )
+                color_stats[video_idx] = video_analysis.get("color_stats")
+                for brightness, frames in enumerate(buckets):
+                    frame_db[brightness].extend((video_idx, frame_idx) for frame_idx in frames)
+                completed += 1
+                if self.progress_callback:
+                    self.progress_callback(completed, len(self.inputs))
         return frame_db, brightness_db, motion_db, activity_db, color_stats
 
     def analyze_audio_file(self):
@@ -1621,11 +1643,16 @@ class GlitchProcessor:
             self.log(f"  Temporary storage: RAM-backed ({temp_root})")
         else:
             self.log(f"  Temporary storage: disk-backed ({temp_root})")
-        frame_db, brightness_db, motion_db, activity_db, color_stats = self.analyze_source_videos()
+        self.log("  Starting source indexing and audio analysis in parallel...")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            source_future = executor.submit(self.analyze_source_videos)
+            audio_future = executor.submit(self.analyze_audio_file)
+            frame_db, brightness_db, motion_db, activity_db, color_stats = source_future.result()
+            if self.stop_requested: return
+            audio_features = audio_future.result()
         if self.stop_requested: return
         if self.lut_path:
             self.load_lut()
-        audio_features = self.analyze_audio_file()
         sr = audio_features["sr"]
         audio_duration = audio_features["duration"]
         bass_energy = audio_features["bass_energy"]
@@ -2168,14 +2195,29 @@ class GlitchProcessor:
         block_paths = []
         block_durations = []
         self.log(f"  Assembling {len(blocks)} transition block(s)...")
-        for block_idx, block in enumerate(blocks):
-            block_segments = block["segments"]
-            block_paths_input = [segment["resource"] for segment in block_segments]
-            block_path = os.path.join(block_dir, f"block_{block_idx + 1:04d}.mp4")
-            self.log(f"    Building block {block_idx + 1}/{len(blocks)} from {len(block_segments)} segment(s)...")
-            self._concat_video_segments(block_paths_input, block_path)
+        block_worker_count = min(max(1, os.cpu_count() or 1), max(1, min(len(blocks), 4)))
+        if block_worker_count > 1 and len(blocks) > 1:
+            self.log(f"  Parallel block assembly with {block_worker_count} workers...")
+        block_results = [None] * len(blocks)
+        with ThreadPoolExecutor(max_workers=block_worker_count) as executor:
+            future_to_idx = {}
+            for block_idx, block in enumerate(blocks):
+                block_segments = block["segments"]
+                block_paths_input = [segment["resource"] for segment in block_segments]
+                block_path = os.path.join(block_dir, f"block_{block_idx + 1:04d}.mp4")
+                self.log(f"    Building block {block_idx + 1}/{len(blocks)} from {len(block_segments)} segment(s)...")
+                future_to_idx[executor.submit(self._concat_video_segments, block_paths_input, block_path)] = (
+                    block_idx,
+                    block_path,
+                    sum(segment["frame_count"] / max(self.fps, 1) for segment in block_segments),
+                )
+            for future in as_completed(future_to_idx):
+                block_idx, block_path, block_duration = future_to_idx[future]
+                future.result()
+                block_results[block_idx] = (block_path, block_duration)
+        for block_path, block_duration in block_results:
             block_paths.append(block_path)
-            block_durations.append(sum(segment["frame_count"] / max(self.fps, 1) for segment in block_segments))
+            block_durations.append(block_duration)
 
         if len(block_paths) == 1:
             temp_video = block_paths[0]
@@ -2868,9 +2910,26 @@ class GlitchGUI:
         self.temp_storage_root = preferred_temp_root() or tempfile.gettempdir()
         if hasattr(psutil, "cpu_percent"):
             psutil.cpu_percent(None)
-        self.root.after(1000, self.refresh_resource_monitor)
+        self.root.after(2000, self.refresh_resource_monitor)
     def refresh_resource_monitor(self):
         if not self.root.winfo_exists():
+            return
+        if not getattr(self, "active_processor", None):
+            if self.resource_cpu_bar:
+                self.resource_cpu_bar["value"] = 0
+            if self.resource_cpu_value:
+                self.resource_cpu_value.config(text="0.0%")
+            if self.resource_ram_bar:
+                self.resource_ram_bar["value"] = 0
+            if self.resource_ram_value:
+                self.resource_ram_value.config(text="0.0%")
+            if self.resource_temp_bar:
+                self.resource_temp_bar["value"] = 0
+            if self.resource_temp_value:
+                self.resource_temp_value.config(text="0.0%")
+            if self.resource_temp_type:
+                self.resource_temp_type.config(text="Idle")
+            self.root.after(4000, self.refresh_resource_monitor)
             return
         try:
             cpu_pct = float(psutil.cpu_percent(None))
@@ -2898,7 +2957,7 @@ class GlitchGUI:
             )
         if self.resource_temp_type:
             self.resource_temp_type.config(text=f"Using {'RAM-backed' if temp_is_ram else 'disk-backed'} temporary storage")
-        self.root.after(1000, self.refresh_resource_monitor)
+        self.root.after(2500, self.refresh_resource_monitor)
     def randomize_render_seed(self):
         self.render_seed.set(str(random.SystemRandom().randint(1, 2**63 - 1)))
     def use_last_render_seed(self):
