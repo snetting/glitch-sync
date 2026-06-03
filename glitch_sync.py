@@ -84,7 +84,7 @@ DEFAULT_EFFECT_TIMING = {
 }
 DEFAULT_STYLE_NAME = "Default"
 STYLE_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".glitchsync_styles.json")
-ANALYSIS_CACHE_VERSION = "6"
+ANALYSIS_CACHE_VERSION = "7"
 ANALYSIS_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "glitchsync", "analysis")
 STATIC_MOTION_THRESHOLD = 0.018
 LAB_EPSILON = 1e-6
@@ -1098,6 +1098,7 @@ class GlitchProcessor:
                     isinstance(cached, dict)
                     and isinstance(cached.get("buckets"), list)
                     and len(cached["buckets"]) == 256
+                    and "brightness_scores" in cached
                     and "color_stats" in cached
                 ):
                     self.log(f"  Using cached index for {os.path.basename(path)}")
@@ -1107,6 +1108,7 @@ class GlitchProcessor:
 
         self.log(f"  Scanning {os.path.basename(path)}...")
         buckets = [[] for _ in range(256)]
+        brightness_scores = []
         motion_scores = []
         activity_scores = []
         lab_sum = np.zeros(3, dtype=np.float64)
@@ -1124,6 +1126,7 @@ class GlitchProcessor:
                 hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
                 b = int(np.mean(hsv[:, :, 2]))
                 buckets[b].append(frame_count)
+                brightness_scores.append((frame_count, b / 255.0))
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
                 sample = cv2.resize(gray, (160, 90), interpolation=cv2.INTER_AREA)
                 motion = 0.0 if prev_sample is None else float(np.mean(cv2.absdiff(sample, prev_sample)) / 255.0)
@@ -1175,6 +1178,7 @@ class GlitchProcessor:
             ]
         video_analysis = {
             "buckets": buckets,
+            "brightness_scores": brightness_scores,
             "motion_scores": motion_scores,
             "activity_scores": activity_scores,
             "color_stats": {
@@ -1197,14 +1201,20 @@ class GlitchProcessor:
         self.log("Indexing video frames...")
         if self.progress_callback: self.progress_callback(-1, -1)
         frame_db = {i: [] for i in range(256)}
+        brightness_db = {}
         motion_db = {}
         activity_db = {}
         color_stats = {}
         for video_idx, path in enumerate(self.inputs):
             video_analysis = self.analyze_video_file(path)
             buckets = video_analysis["buckets"]
+            brightness_scores = video_analysis.get("brightness_scores", [])
             motion_scores = video_analysis.get("motion_scores", [])
             activity_scores = video_analysis.get("activity_scores", [])
+            brightness_db[video_idx] = (
+                [frame for frame, _ in brightness_scores],
+                [score for _, score in brightness_scores],
+            )
             motion_db[video_idx] = (
                 [frame for frame, _ in motion_scores],
                 [score for _, score in motion_scores],
@@ -1216,7 +1226,7 @@ class GlitchProcessor:
             color_stats[video_idx] = video_analysis.get("color_stats")
             for brightness, frames in enumerate(buckets):
                 frame_db[brightness].extend((video_idx, frame_idx) for frame_idx in frames)
-        return frame_db, motion_db, activity_db, color_stats
+        return frame_db, brightness_db, motion_db, activity_db, color_stats
 
     def analyze_audio_file(self):
         cache_path = analysis_cache_path(self.audio, "audio", "npz")
@@ -1350,7 +1360,7 @@ class GlitchProcessor:
     def process(self):
         package_dir = None
         clip_dir = None
-        frame_db, motion_db, activity_db, color_stats = self.analyze_source_videos()
+        frame_db, brightness_db, motion_db, activity_db, color_stats = self.analyze_source_videos()
         if self.stop_requested: return
         if self.lut_path:
             self.load_lut()
@@ -1418,6 +1428,10 @@ class GlitchProcessor:
         segments = []
         rendered_frames = 0
         source_streak = 0
+        match_quality_total = 0.0
+        match_brightness_total = 0.0
+        match_activity_total = 0.0
+        match_segments = 0
         if self.export_mode == EXPORT_CLIP_MLT:
             package_dir = tempfile.mkdtemp(prefix="glitchsync_shotcut_")
             clip_dir = os.path.join(package_dir, "media", "clips")
@@ -1446,6 +1460,7 @@ class GlitchProcessor:
             clip_mids = norm_range(mids_energy, max_mids, t_start, clip_end)
             music_energy = np.clip((clip_rms * 0.55) + (clip_bass * 0.30) + (clip_highs * 0.15), 0, 1)
             target_brightness = int(np.clip(((1 - self.music_match) * curr_rms) + (self.music_match * music_energy), 0, 1) * 255)
+            target_brightness_norm = target_brightness / 255.0
             target_activity = np.clip((clip_rms * 0.45) + (clip_bass * 0.40) + (clip_highs * 0.15), 0, 1)
             
             match = self.find_best_match(
@@ -1473,6 +1488,22 @@ class GlitchProcessor:
                 rewind_amount = self.effect_amount("rewind")
                 if self.rewind and clip_rms > 0.75 and random.random() < min(1.0, rewind_amount):
                     chunk = chunk[::-1]
+
+                selected_brightness = self.segment_motion_score(brightness_db, self.current_vid_idx, start_frame, len(chunk))
+                selected_activity = self.segment_motion_score(activity_db, self.current_vid_idx, start_frame, len(chunk))
+                brightness_error = abs(selected_brightness - target_brightness_norm)
+                activity_error = abs(selected_activity - target_activity)
+                segment_quality = float(np.clip(1.0 - ((brightness_error + activity_error) * 0.5), 0, 1))
+                match_quality_total += segment_quality
+                match_brightness_total += float(np.clip(1.0 - brightness_error, 0, 1))
+                match_activity_total += float(np.clip(1.0 - activity_error, 0, 1))
+                match_segments += 1
+                if match_segments <= 5 or ((i + 1) % 10 == 0) or (i + 1 == len(cut_times)):
+                    self.log(
+                        f"  Match {i + 1}/{len(cut_times)}: quality {segment_quality:.2f} "
+                        f"(brightness {selected_brightness:.2f}/{target_brightness_norm:.2f}, "
+                        f"activity {selected_activity:.2f}/{target_activity:.2f})"
+                    )
 
                 pixelate_amount = self.effect_amount("pixelate")
                 flash_amount = self.effect_amount("flash")
@@ -1643,6 +1674,12 @@ class GlitchProcessor:
                 self.export_final_video(temp_video)
             else:
                 self.export_shotcut_archive(temp_video, segments, width, height, package_dir)
+            if match_segments:
+                self.log(
+                    f"Source match summary: quality {match_quality_total / match_segments:.2f}, "
+                    f"brightness {match_brightness_total / match_segments:.2f}, "
+                    f"activity {match_activity_total / match_segments:.2f} over {match_segments} segments"
+                )
         if os.path.exists(temp_video): os.remove(temp_video)
         if package_dir and os.path.exists(package_dir): shutil.rmtree(package_dir)
         if self.stop_requested:
