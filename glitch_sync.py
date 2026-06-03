@@ -720,6 +720,14 @@ def apply_static_pan_zoom(frame, progress, amount, pan_x, pan_y):
     cropped = frame[y:y + crop_h, x:x + crop_w]
     return cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
 
+def parse_render_seed(seed_text):
+    if seed_text is None:
+        return None
+    text = str(seed_text).strip()
+    if not text:
+        return None
+    return int(text, 0)
+
 # --- Core Logic ---
 
 class GlitchProcessor:
@@ -745,7 +753,8 @@ class GlitchProcessor:
                  ai_cfg_scale=AI_DEFAULT_CFG_SCALE, ai_steps=AI_DEFAULT_STEPS,
                  ai_max_dim=AI_DEFAULT_MAX_DIM, ai_blend=AI_DEFAULT_BLEND,
                  verbose_match_logging=False,
-                 debug_match_logging=False):
+                 debug_match_logging=False,
+                 render_seed=None):
         self.inputs, self.audio, self.output = inputs, audio, output
         self.duration, self.fps = duration, fps
         self.pixelate, self.flash, self.rewind = pixelate, flash, rewind
@@ -781,6 +790,7 @@ class GlitchProcessor:
         self.ai_blend = float(np.clip(ai_blend, 0.0, 1.0))
         self.verbose_match_logging = bool(verbose_match_logging)
         self.debug_match_logging = bool(debug_match_logging)
+        self.render_seed = render_seed
         self.ai_session = requests.Session()
         self.ai_backend_warning_shown = False
         self.ai_backend_model_warning_shown = False
@@ -822,6 +832,16 @@ class GlitchProcessor:
             self.export_quality_label,
             EXPORT_QUALITY_LABELS["High quality (slower)"],
         )
+
+    def initialize_rng(self):
+        seed = self.render_seed
+        if seed is None:
+            seed = random.SystemRandom().randint(1, 2**63 - 1)
+        seed = int(seed)
+        self.render_seed = seed
+        random.seed(seed)
+        np.random.seed(seed % (2**32))
+        return seed
 
     def ai_stylization_active(self):
         return self.experimental_mode and self.ai_enabled and bool(self.ai_backend_url) and bool(self.ai_prompt)
@@ -907,7 +927,7 @@ class GlitchProcessor:
             payload = {
                 "prompt": self.ai_prompt,
                 "negative_prompt": self.ai_negative_prompt,
-                "seed": -1,
+                "seed": random.randint(0, 2**31 - 1),
                 "width": target_width,
                 "height": target_height,
                 "num_outputs": 1,
@@ -1471,6 +1491,8 @@ class GlitchProcessor:
     def process(self):
         package_dir = None
         clip_dir = None
+        seed = self.initialize_rng()
+        self.log(f"  Render seed: {seed}")
         frame_db, brightness_db, motion_db, activity_db, color_stats = self.analyze_source_videos()
         if self.stop_requested: return
         if self.lut_path:
@@ -1876,6 +1898,7 @@ class GlitchGUI:
         self.increment_output_if_exists = tk.BooleanVar(value=False)
         self.verbose_match_logging = tk.BooleanVar(value=False)
         self.debug_match_logging = tk.BooleanVar(value=False)
+        self.render_seed = tk.StringVar(value="")
         self.experimental_mode = tk.BooleanVar(value=False)
         self.ai_panel_visible = self.experimental_mode
         self.ai_dream_chance = tk.DoubleVar(value=0.25)
@@ -2091,37 +2114,46 @@ class GlitchGUI:
         ttk.Combobox(io, textvariable=self.output_resolution_label, values=list(OUTPUT_RESOLUTION_LABELS.keys()), state="readonly").grid(row=4, column=1, sticky="ew")
         ttk.Label(io, text="Out:").grid(row=5, column=0)
         ttk.Entry(io, textvariable=self.output).grid(row=5, column=1, sticky="ew")
+        ttk.Label(io, text="Seed:").grid(row=6, column=0, sticky="w")
+        seed_controls = ttk.Frame(io); seed_controls.grid(row=6, column=1, sticky="ew", pady=5)
+        seed_controls.columnconfigure(0, weight=1)
+        render_seed_entry = ttk.Entry(seed_controls, textvariable=self.render_seed)
+        render_seed_entry.grid(row=0, column=0, sticky="ew")
+        seed_randomize_button = ttk.Button(seed_controls, text="Randomize", command=self.randomize_render_seed)
+        seed_randomize_button.grid(row=0, column=1, padx=(5, 0))
         output_name_mode = ttk.Checkbutton(io, text="Increment if exists", variable=self.increment_output_if_exists)
-        output_name_mode.grid(row=6, column=1, sticky="w")
-        ttk.Label(io, text="Render length:").grid(row=7, column=0, sticky="w")
-        render_length_controls = ttk.Frame(io); render_length_controls.grid(row=7, column=1, sticky="w", pady=5)
+        output_name_mode.grid(row=7, column=1, sticky="w")
+        ttk.Label(io, text="Render length:").grid(row=8, column=0, sticky="w")
+        render_length_controls = ttk.Frame(io); render_length_controls.grid(row=8, column=1, sticky="w", pady=5)
         ttk.Combobox(render_length_controls, textvariable=self.render_mode, values=["Full", "Snippet"], state="readonly", width=10).pack(side=tk.LEFT)
         ttk.Spinbox(render_length_controls, from_=1, to=3600, textvariable=self.snippet_duration, width=7).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Label(render_length_controls, text="sec").pack(side=tk.LEFT, padx=(4, 0))
-        ttk.Checkbutton(io, text="Primary focus", variable=self.primary_enabled).grid(row=8, column=0, sticky="w")
-        primary_controls = ttk.Frame(io); primary_controls.grid(row=8, column=1, sticky="w", pady=5)
+        ttk.Checkbutton(io, text="Primary focus", variable=self.primary_enabled).grid(row=9, column=0, sticky="w")
+        primary_controls = ttk.Frame(io); primary_controls.grid(row=9, column=1, sticky="w", pady=5)
         ttk.Button(primary_controls, text="Set Selected", command=self.set_primary_video).pack(side=tk.LEFT)
         ttk.Label(primary_controls, textvariable=self.primary_video_label).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Label(io, text="Focus:").grid(row=9, column=0, sticky="w")
-        primary_focus_controls = ttk.Frame(io); primary_focus_controls.grid(row=9, column=1, sticky="ew")
+        ttk.Label(io, text="Focus:").grid(row=10, column=0, sticky="w")
+        primary_focus_controls = ttk.Frame(io); primary_focus_controls.grid(row=10, column=1, sticky="ew")
         primary_focus_controls.columnconfigure(0, weight=1)
         ttk.Scale(primary_focus_controls, from_=0.0, to=1.0, variable=self.primary_focus, command=lambda e: self.update_primary_focus_label()).grid(row=0, column=0, sticky="ew")
         self.primary_focus_label = ttk.Label(primary_focus_controls, text="0.75", width=5); self.primary_focus_label.grid(row=0, column=1, sticky="w", padx=(8, 0))
-        ttk.Checkbutton(io, text="Color match", variable=self.color_match_enabled).grid(row=10, column=0, sticky="w")
-        color_ref_controls = ttk.Frame(io); color_ref_controls.grid(row=10, column=1, sticky="w", pady=5)
+        ttk.Checkbutton(io, text="Color match", variable=self.color_match_enabled).grid(row=11, column=0, sticky="w")
+        color_ref_controls = ttk.Frame(io); color_ref_controls.grid(row=11, column=1, sticky="w", pady=5)
         ttk.Button(color_ref_controls, text="Set Selected", command=self.set_color_reference_video).pack(side=tk.LEFT)
         ttk.Label(color_ref_controls, textvariable=self.color_reference_label).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Label(io, text="Ref match:").grid(row=11, column=0, sticky="w")
-        color_match_controls = ttk.Frame(io); color_match_controls.grid(row=11, column=1, sticky="ew")
+        ttk.Label(io, text="Ref match:").grid(row=12, column=0, sticky="w")
+        color_match_controls = ttk.Frame(io); color_match_controls.grid(row=12, column=1, sticky="ew")
         color_match_controls.columnconfigure(0, weight=1)
         ttk.Scale(color_match_controls, from_=0.0, to=1.0, variable=self.color_match_strength, command=lambda e: self.update_color_match_strength_label()).grid(row=0, column=0, sticky="ew")
         self.color_match_strength_label = ttk.Label(color_match_controls, text="0.50", width=5); self.color_match_strength_label.grid(row=0, column=1, sticky="w", padx=(8, 0))
-        ttk.Label(io, text="LUT:").grid(row=12, column=0, sticky="w")
-        lut_controls = ttk.Frame(io); lut_controls.grid(row=12, column=1, sticky="ew", pady=5)
+        ttk.Label(io, text="LUT:").grid(row=13, column=0, sticky="w")
+        lut_controls = ttk.Frame(io); lut_controls.grid(row=13, column=1, sticky="ew", pady=5)
         lut_controls.columnconfigure(0, weight=1)
         ttk.Entry(lut_controls, textvariable=self.lut_path).grid(row=0, column=0, sticky="ew")
         ttk.Button(lut_controls, text="...", command=self.pick_lut, width=3).grid(row=0, column=1, padx=(5, 0))
         ttk.Button(lut_controls, text="Clear", command=self.clear_lut).grid(row=0, column=2, padx=(5, 0))
+        self.add_tooltip(render_seed_entry, "Leave blank for a fresh random seed. Enter a number to reproduce the same render later.")
+        self.add_tooltip(seed_randomize_button, "Fill the seed field with a new random value.")
 
         pv = ttk.LabelFrame(m, text="Live Preview & Review", padding="10"); pv.grid(row=0, column=1, sticky="nsew", padx=5, pady=5)
         self.cv = tk.Canvas(pv, width=480, height=270, bg="black"); self.cv.pack(pady=5)
@@ -2383,6 +2415,8 @@ class GlitchGUI:
     def update_ai_blend_label(self):
         if self.ai_blend_label:
             self.ai_blend_label.config(text=f"{self.ai_blend.get():.2f}")
+    def randomize_render_seed(self):
+        self.render_seed.set(str(random.SystemRandom().randint(1, 2**63 - 1)))
     def load_styles_file(self):
         try:
             with open(STYLE_CONFIG_PATH, "r", encoding="utf-8") as f:
@@ -2438,7 +2472,7 @@ class GlitchGUI:
             self.style_choice.set(DEFAULT_STYLE_NAME)
         elif names and self.style_choice.get() not in names:
             self.style_choice.set(names[0])
-    def collect_settings(self, include_media_refs=False):
+    def collect_settings(self, include_media_refs=False, include_seed=False):
         settings = {
             "export_mode_label": self.export_mode_label.get(),
             "output_resolution_label": self.output_resolution_label.get(),
@@ -2492,6 +2526,8 @@ class GlitchGUI:
             "primary_enabled": self.primary_enabled.get(),
             "primary_focus": self.primary_focus.get(),
         }
+        if include_seed:
+            settings["render_seed"] = self.render_seed.get()
         if include_media_refs:
             settings["color_reference_idx"] = self.color_reference_idx
             settings["color_reference_label"] = self.color_reference_label.get()
@@ -2512,7 +2548,7 @@ class GlitchGUI:
             "lut_path": self.lut_path.get(),
             "style_name": self.style_name.get(),
             "style_choice": self.style_choice.get(),
-            "settings": self.collect_settings(include_media_refs=True),
+            "settings": self.collect_settings(include_media_refs=True, include_seed=True),
         }
     def update_project_title(self):
         if self.current_project_path:
@@ -2528,6 +2564,7 @@ class GlitchGUI:
         self.set_output(f"glitch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4", True)
         self.output_resolution_label.set("Auto (first input)")
         self.export_quality_label.set("High quality (slower)")
+        self.render_seed.set("")
         self.primary_video_idx = 0
         self.primary_video_label.set("Primary: first input")
         self.color_reference_idx = 0
@@ -2575,7 +2612,10 @@ class GlitchGUI:
         self.style_name.set(project.get("style_name", self.style_name.get()))
         if project.get("style_choice"):
             self.style_choice.set(project["style_choice"])
-        self.apply_settings(project.get("settings", {}))
+        settings = project.get("settings", {})
+        self.apply_settings(settings)
+        if not isinstance(settings, dict) or "render_seed" not in settings:
+            self.render_seed.set("")
     def write_project(self, path):
         path = os.path.abspath(path)
         self.sync_auto_output_to_project(path)
@@ -2624,6 +2664,8 @@ class GlitchGUI:
         self.increment_output_if_exists.set(settings.get("increment_output_if_exists", self.increment_output_if_exists.get()))
         self.verbose_match_logging.set(settings.get("verbose_match_logging", self.verbose_match_logging.get()))
         self.debug_match_logging.set(settings.get("debug_match_logging", self.debug_match_logging.get()))
+        render_seed = settings.get("render_seed", self.render_seed.get())
+        self.render_seed.set("" if render_seed is None else str(render_seed))
         experimental_mode = settings.get("experimental_mode")
         if experimental_mode is None:
             experimental_mode = settings.get("ai_panel_visible", self.experimental_mode.get())
@@ -2890,6 +2932,10 @@ class GlitchGUI:
             color_match_strength = self.color_match_strength.get() if self.color_match_enabled.get() else 0.0
             render_limit = self.snippet_duration.get() if self.render_mode.get() == "Snippet" else None
             output_resolution = OUTPUT_RESOLUTION_LABELS.get(self.output_resolution_label.get())
+            seed = parse_render_seed(self.render_seed.get())
+            if seed is None:
+                seed = random.SystemRandom().randint(1, 2**63 - 1)
+                self.render_seed.set(str(seed))
             p = GlitchProcessor(
                 self.inputs,
                 self.audio.get(),
@@ -2943,6 +2989,7 @@ class GlitchGUI:
                 self.ai_blend.get(),
                 self.verbose_match_logging.get(),
                 self.debug_match_logging.get(),
+                seed,
             )
             self.active_processor = p
             if self.render_was_stopped:
@@ -2990,9 +3037,13 @@ if __name__ == "__main__":
     p.add_argument("--beat-variation", type=float, default=0.0)
     p.add_argument("--render-limit", type=float)
     p.add_argument("--music-match", type=float, default=0.35)
+    p.add_argument("--seed", type=int)
     args = p.parse_args()
     if args.gui or not (args.inputs and args.audio):
         r = tk.Tk(); g = GlitchGUI(r); r.mainloop()
     else:
-        proc = GlitchProcessor(args.inputs, args.audio, args.output, beat_sync=args.beat_sync, export_mode=args.export_mode, progress_callback=lambda c, t: print(f"Progress: {c}/{t}", end='\r'), beat_step=args.beat_step, beat_variation=args.beat_variation, render_limit=args.render_limit, music_match=args.music_match, export_quality_label=args.export_quality)
+        if args.seed is not None:
+            random.seed(args.seed)
+            np.random.seed(int(args.seed) % (2**32))
+        proc = GlitchProcessor(args.inputs, args.audio, args.output, beat_sync=args.beat_sync, export_mode=args.export_mode, progress_callback=lambda c, t: print(f"Progress: {c}/{t}", end='\r'), beat_step=args.beat_step, beat_variation=args.beat_variation, render_limit=args.render_limit, music_match=args.music_match, export_quality_label=args.export_quality, render_seed=args.seed)
         proc.process()
