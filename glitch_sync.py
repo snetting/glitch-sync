@@ -89,7 +89,7 @@ ANALYSIS_CACHE_DIR = os.path.join(os.path.expanduser("~"), ".cache", "glitchsync
 STATIC_MOTION_THRESHOLD = 0.018
 LAB_EPSILON = 1e-6
 AI_DEFAULT_BACKEND_URL = "http://127.0.0.1:9000"
-AI_DEFAULT_PROMPT = "dreamlike img2img transformation of the input image, preserve the original subject and composition, and reimagine it as a surreal cinematic dream scene with soft painterly detail"
+AI_DEFAULT_PROMPT = "dreamlike transformation of the input image, preserve the original subject and composition, and reimagine it as a surreal cinematic dream scene with soft painterly detail"
 AI_DEFAULT_NEGATIVE_PROMPT = "blurry, low quality, watermark, text"
 AI_DEFAULT_EVERY_N_FRAMES = 12
 AI_DEFAULT_DENOISE = 0.32
@@ -1915,7 +1915,7 @@ class GlitchGUI:
         self.ai_frame = ttk.LabelFrame(set_f, text="Experimental AI Stylization", padding="10")
         self.ai_frame.grid(row=12, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         self.ai_frame.columnconfigure(1, weight=1)
-        ttk.Checkbutton(self.ai_frame, text="Enable AI stylization", variable=self.ai_enabled).grid(row=0, column=0, sticky="w")
+        ttk.Label(self.ai_frame, text="AI stylization is enabled from the Effects panel.").grid(row=0, column=0, columnspan=2, sticky="w")
         ttk.Label(self.ai_frame, text="Easy Diffusion URL:").grid(row=1, column=0, sticky="w")
         ai_backend_entry = ttk.Entry(self.ai_frame, textvariable=self.ai_backend_url)
         ai_backend_entry.grid(row=1, column=1, sticky="ew")
@@ -2017,14 +2017,14 @@ class GlitchGUI:
             fx,
             11,
             "AI Dream Chance",
-            None,
+            self.ai_enabled,
             "ai_dream_chance",
             1.0,
             amount_var=self.ai_dream_chance,
             timing_var=self.ai_dream_timing,
             timing_values=AI_DREAM_TIMING_LABELS,
-            show_check=False,
         )
+        self.ai_dream_row_widgets = (ai_dream_label, ai_dream_scale, ai_dream_timing)
         self.add_tooltip(ai_dream_label, "Probability that a clip gets AI stylization, with quieter sections favored automatically.")
         self.add_tooltip(ai_dream_scale, "Higher values make AI more likely to appear on a clip; quieter clips get a stronger boost.")
         self.add_tooltip(ai_dream_timing, "Clip biases the chance upward in quieter clips. Random uses the base chance unchanged, regardless of audio energy.")
@@ -2048,10 +2048,13 @@ class GlitchGUI:
         if not hasattr(self, "ai_frame"):
             return
         if self.experimental_mode.get():
+            for widget in getattr(self, "ai_dream_row_widgets", ()):
+                widget.grid()
             self.ai_frame.grid()
         else:
-            self.ai_enabled.set(False)
             self.ai_frame.grid_remove()
+            for widget in getattr(self, "ai_dream_row_widgets", ()):
+                widget.grid_remove()
     def add_effect_control(self, parent, row, label, enabled_var, amount_name, max_value=2.0, amount_var=None, timing_var=None, timing_values=None, show_check=True):
         amount_var = amount_var or self.effect_amounts[amount_name]
         timing_var = timing_var or self.effect_timing[amount_name]
@@ -2352,7 +2355,7 @@ class GlitchGUI:
         self.ai_dream_chance.set(settings.get("ai_dream_chance", self.ai_dream_chance.get()))
         ai_dream_timing = settings.get("ai_dream_timing", self.ai_dream_timing.get())
         self.ai_dream_timing.set(ai_dream_timing if ai_dream_timing in AI_DREAM_TIMING_LABELS else "Clip")
-        self.ai_enabled.set(settings.get("ai_enabled", self.ai_enabled.get()) if self.experimental_mode.get() else False)
+        self.ai_enabled.set(settings.get("ai_enabled", self.ai_enabled.get()))
         self.ai_segment_anchor_only.set(settings.get("ai_segment_anchor_only", self.ai_segment_anchor_only.get()))
         self.ai_backend_url.set(settings.get("ai_backend_url", self.ai_backend_url.get()))
         self.ai_prompt.set(settings.get("ai_prompt", self.ai_prompt.get()))
