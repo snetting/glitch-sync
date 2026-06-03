@@ -1400,6 +1400,7 @@ class GlitchProcessor:
             return self.choose_candidate(candidates_other, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
         offset = 1
         first_fallback = None
+        skipped_single_source_bands = 0
         while offset < 256:
             low, high = target_b - offset, target_b + offset
             fallback = []
@@ -1415,17 +1416,19 @@ class GlitchProcessor:
             if fallback:
                 fallback_sources = {v_idx for v_idx, _ in fallback}
                 if source_streak >= SOURCE_LOCK_TRIGGER_STREAK and len(fallback_sources) < 2:
+                    skipped_single_source_bands += 1
                     if self.debug_match_logging:
                         self.log(
                             f"  Debug fallback skip: offset={offset} candidates={len(fallback)} "
-                            f"sources={len(fallback_sources)}"
+                            f"sources={len(fallback_sources)} skipped={skipped_single_source_bands}"
                         )
                     offset += 1
                     continue
                 if self.debug_match_logging:
                     self.log(
                         f"  Debug fallback: offset={offset} candidates={len(fallback)} "
-                        f"primary={len(primary_fallback)} sources={len(fallback_sources)}"
+                        f"primary={len(primary_fallback)} sources={len(fallback_sources)} "
+                        f"skipped={skipped_single_source_bands}"
                     )
                 return self.choose_candidate(fallback, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
             offset += 1
@@ -1434,7 +1437,7 @@ class GlitchProcessor:
                 fallback_sources = {v_idx for v_idx, _ in first_fallback}
                 self.log(
                     f"  Debug fallback last-resort: candidates={len(first_fallback)} "
-                    f"sources={len(fallback_sources)}"
+                    f"sources={len(fallback_sources)} skipped={skipped_single_source_bands}"
                 )
             return self.choose_candidate(first_fallback, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
         return None
