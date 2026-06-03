@@ -820,7 +820,7 @@ class GlitchProcessor:
         if self.ai_dream_timing == "Random":
             return base
         quietness = float(np.clip(1.0 - clip_rms, 0.0, 1.0))
-        boosted = base + ((1.0 - base) * quietness * 0.75)
+        boosted = base + ((1.0 - base) * (quietness ** 1.6) * 0.9)
         return float(np.clip(boosted, 0.0, 1.0))
 
     def ai_backend_base_url(self):
@@ -2027,7 +2027,7 @@ class GlitchGUI:
         )
         self.add_tooltip(ai_dream_label, "Probability that a clip gets AI stylization, with quieter sections favored automatically.")
         self.add_tooltip(ai_dream_scale, "Higher values make AI more likely to appear on a clip; quieter clips get a stronger boost.")
-        self.add_tooltip(ai_dream_timing, "Clip uses quietness-weighted probability. Random uses the base probability without the quietness boost.")
+        self.add_tooltip(ai_dream_timing, "Clip biases the chance upward in quieter clips. Random uses the base chance unchanged, regardless of audio energy.")
 
         log_f = ttk.LabelFrame(m, text="Engine Log", padding="5"); log_f.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=5)
         self.log_t = tk.Text(log_f, height=8, font=('Consolas', 9)); self.log_t.pack(fill=tk.BOTH, expand=True)
