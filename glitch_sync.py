@@ -2544,9 +2544,14 @@ class GlitchGUI:
 
     def build_ui(self):
         m = ttk.Frame(self.root, padding="15"); m.pack(fill=tk.BOTH, expand=True)
-        m.columnconfigure(0, weight=1); m.columnconfigure(1, weight=1)
-        m.rowconfigure(0, weight=1)
-        m.rowconfigure(1, weight=1)
+        m.columnconfigure(0, weight=1)
+        m.columnconfigure(1, weight=1)
+        m.rowconfigure(0, weight=0)
+        m.rowconfigure(1, weight=0)
+        m.rowconfigure(2, weight=0)
+        m.rowconfigure(3, weight=1)
+        m.rowconfigure(4, weight=0)
+        m.rowconfigure(5, weight=0)
         
         io = ttk.LabelFrame(m, text="Files", padding="10"); io.grid(row=0, column=0, sticky="nsew", padx=5, pady=5)
         io.columnconfigure(1, weight=1)
@@ -2623,6 +2628,7 @@ class GlitchGUI:
         right_top.columnconfigure(0, weight=1)
         right_top.rowconfigure(0, weight=0)
         right_top.rowconfigure(1, weight=0)
+        right_top.rowconfigure(2, weight=0)
         pv = ttk.LabelFrame(right_top, text="Live Preview & Review", padding="8"); pv.grid(row=0, column=0, sticky="ew")
         self.cv = tk.Canvas(pv, width=480, height=150, bg="black"); self.cv.pack(pady=(2, 4), fill=tk.X)
         self.rv_btn = ttk.Button(pv, text="REVIEW WITH AUDIO", command=self.review_render, state=tk.DISABLED); self.rv_btn.pack(fill=tk.X)
@@ -2801,7 +2807,7 @@ class GlitchGUI:
         self.add_tooltip(load_style_label, "Choose a saved style to restore a preset configuration.")
         self.add_tooltip(self.style_combo, "Select a built-in or saved style.")
 
-        fx = ttk.LabelFrame(m, text="Effects", padding="10"); fx.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=5, pady=5)
+        fx = ttk.LabelFrame(right_top, text="Effects", padding="10"); fx.grid(row=2, column=0, sticky="ew", pady=(6, 0))
         fx.columnconfigure(1, weight=1)
         ttk.Label(fx, text="Amount").grid(row=0, column=1, sticky="w", padx=5)
         ttk.Label(fx, text="Timing").grid(row=0, column=3, sticky="w", padx=(8, 0))
