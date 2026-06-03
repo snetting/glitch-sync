@@ -47,7 +47,7 @@ OUTPUT_RESOLUTION_LABELS = {
 }
 
 EXPORT_QUALITY_LABELS = {
-    "Master quality (largest)": ("slow", "18"),
+    "Master quality (largest)": ("ultrafast", "0"),
     "High quality (slower)": ("medium", "21"),
     "Balanced": ("fast", "22"),
     "Fast preview": ("veryfast", "24"),
@@ -391,6 +391,66 @@ def scene_transition_ffmpeg_name(mode):
 def ffmpeg_concat_list_line(path):
     abs_path = os.path.abspath(path)
     return "file '" + abs_path.replace("'", "'\\''") + "'"
+
+
+def preferred_temp_root():
+    for path in ("/dev/shm", "/run/shm"):
+        if os.path.isdir(path) and os.access(path, os.W_OK | os.X_OK):
+            return path
+    return None
+
+
+class LosslessVideoWriter:
+    def __init__(self, output_path, width, height, fps):
+        self.output_path = output_path
+        self.proc = subprocess.Popen([
+            'ffmpeg', '-y',
+            '-f', 'rawvideo',
+            '-pix_fmt', 'bgr24',
+            '-s', f'{width}x{height}',
+            '-r', str(float(fps)),
+            '-i', 'pipe:0',
+            '-an',
+            '-c:v', 'libx264',
+            '-preset', 'ultrafast',
+            '-crf', '0',
+            '-pix_fmt', 'yuv420p',
+            output_path,
+        ], stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.closed = False
+
+    def write(self, frame):
+        if self.closed or self.proc.stdin is None:
+            raise RuntimeError("Lossless video writer is already closed")
+        try:
+            self.proc.stdin.write(frame.astype(np.uint8, copy=False).tobytes())
+        except BrokenPipeError:
+            stderr = ""
+            try:
+                if self.proc.stderr is not None:
+                    stderr = self.proc.stderr.read().decode(errors="ignore").strip()
+            except Exception:
+                pass
+            raise RuntimeError(stderr or f"ffmpeg stopped while writing {self.output_path}")
+
+    def release(self):
+        if self.closed:
+            return
+        self.closed = True
+        if self.proc.stdin is not None:
+            try:
+                self.proc.stdin.close()
+            except Exception:
+                pass
+        stderr = ""
+        if self.proc.stderr is not None:
+            try:
+                stderr = self.proc.stderr.read().decode(errors="ignore").strip()
+            except Exception:
+                stderr = ""
+        rc = self.proc.wait()
+        if rc != 0:
+            raise RuntimeError(stderr or f"ffmpeg failed while writing {self.output_path}")
 
 
 BUILTIN_STYLES = {
@@ -1543,6 +1603,7 @@ class GlitchProcessor:
     def process(self):
         package_dir = None
         clip_dir = None
+        temp_root = preferred_temp_root()
         seed = self.initialize_rng()
         self.log(f"  Render seed: {seed}")
         frame_db, brightness_db, motion_db, activity_db, color_stats = self.analyze_source_videos()
@@ -1744,14 +1805,15 @@ class GlitchProcessor:
         out = None
         segment_dir = None
         if self.export_mode == EXPORT_CUT_AWARE_MLT:
-            temp_video = f"temp_{random.randint(1000, 9999)}.avi"
-            out = cv2.VideoWriter(temp_video, cv2.VideoWriter_fourcc(*'XVID'), self.fps, (width, height))
+            temp_fd, temp_video = tempfile.mkstemp(suffix=".mp4", prefix="glitchsync_render_", dir=temp_root)
+            os.close(temp_fd)
+            out = LosslessVideoWriter(temp_video, width, height, self.fps)
         caps, prev_f = [cv2.VideoCapture(f) for f in self.inputs], None
         reference_stats = color_stats.get(self.color_reference_idx) if self.color_reference_idx is not None else None
         segments = []
         rendered_frames = 0
         if self.export_mode in (EXPORT_FINAL_VIDEO, EXPORT_CLIP_MLT):
-            package_dir = tempfile.mkdtemp(prefix="glitchsync_shotcut_")
+            package_dir = tempfile.mkdtemp(prefix="glitchsync_shotcut_", dir=temp_root)
             if self.export_mode == EXPORT_CLIP_MLT:
                 clip_dir = os.path.join(package_dir, "media", "clips")
                 os.makedirs(clip_dir, exist_ok=True)
@@ -1864,12 +1926,12 @@ class GlitchProcessor:
             segment_writer = None
             segment_path = None
             if self.export_mode == EXPORT_FINAL_VIDEO:
-                segment_path = os.path.join(segment_dir, f"segment_{i + 1:04d}.avi")
-                segment_writer = cv2.VideoWriter(segment_path, cv2.VideoWriter_fourcc(*'XVID'), self.fps, (width, height))
+                segment_path = os.path.join(segment_dir, f"segment_{i + 1:04d}.mp4")
+                segment_writer = LosslessVideoWriter(segment_path, width, height, self.fps)
             elif self.export_mode == EXPORT_CLIP_MLT:
-                clip_name = f"clip_{len(segments) + 1:04d}.avi"
+                clip_name = f"clip_{len(segments) + 1:04d}.mp4"
                 segment_path = os.path.join(clip_dir, clip_name)
-                segment_writer = cv2.VideoWriter(segment_path, cv2.VideoWriter_fourcc(*'XVID'), self.fps, (width, height))
+                segment_writer = LosslessVideoWriter(segment_path, width, height, self.fps)
             for frame_idx, f in enumerate(chunk):
                 if self.stop_requested:
                     break
@@ -2041,15 +2103,8 @@ class GlitchProcessor:
     def _concat_video_segments(self, input_paths, output_path):
         if not input_paths:
             raise RuntimeError("No segment clips available for concatenation")
-        preset, crf = self.export_quality_args()
         if len(input_paths) == 1:
-            result = subprocess.run([
-                'ffmpeg', '-y', '-i', input_paths[0],
-                '-c:v', 'libx264', '-preset', preset, '-crf', crf,
-                '-pix_fmt', 'yuv420p', '-an', output_path
-            ], capture_output=True)
-            if result.returncode != 0:
-                raise RuntimeError(result.stderr.decode(errors="ignore") or "ffmpeg failed while encoding a segment block")
+            shutil.copy2(input_paths[0], output_path)
             return
         list_file = tempfile.NamedTemporaryFile("w", delete=False, suffix=".txt", encoding="utf-8")
         try:
@@ -2059,8 +2114,9 @@ class GlitchProcessor:
             list_file.close()
             result = subprocess.run([
                 'ffmpeg', '-y', '-f', 'concat', '-safe', '0', '-i', list_file.name,
-                '-c:v', 'libx264', '-preset', preset, '-crf', crf,
-                '-pix_fmt', 'yuv420p', '-an', output_path
+                '-c', 'copy',
+                '-an',
+                output_path
             ], capture_output=True)
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.decode(errors="ignore") or "ffmpeg failed while concatenating a segment block")
