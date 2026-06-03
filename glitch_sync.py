@@ -389,7 +389,8 @@ def scene_transition_ffmpeg_name(mode):
 
 
 def ffmpeg_concat_list_line(path):
-    return "file " + json.dumps(os.path.abspath(path))
+    abs_path = os.path.abspath(path)
+    return "file '" + abs_path.replace("'", "'\\''") + "'"
 
 
 BUILTIN_STYLES = {
@@ -1619,6 +1620,9 @@ class GlitchProcessor:
                 1,
             )
             segment_profiles.append(profile)
+        self.log(f"  Planning {len(segment_profiles)} segment(s)...")
+        if self.progress_callback:
+            self.progress_callback(-1, -1)
         activity_scale = self.motion_scale(activity_db)
         saved_log = self.log
         saved_random_state = random.getstate()
@@ -1696,6 +1700,7 @@ class GlitchProcessor:
             self.recent_matches = saved_recent_matches
             self.source_lock_penalties = saved_source_lock_penalties
 
+        self.log(f"  Planned {len(planned_segments)} segment(s); preparing output assembly...")
         transition_boundaries = []
         for i in range(max(0, len(planned_segments) - 1)):
             current = planned_segments[i]
@@ -2043,7 +2048,7 @@ class GlitchProcessor:
         list_file = tempfile.NamedTemporaryFile("w", delete=False, suffix=".txt", encoding="utf-8")
         try:
             for path in input_paths:
-                list_file.write(f"file {json.dumps(os.path.abspath(path))}\n")
+                list_file.write(ffmpeg_concat_list_line(path) + "\n")
             list_file.flush()
             list_file.close()
             result = subprocess.run([
@@ -2085,10 +2090,12 @@ class GlitchProcessor:
 
         block_paths = []
         block_durations = []
+        self.log(f"  Assembling {len(blocks)} transition block(s)...")
         for block_idx, block in enumerate(blocks):
             block_segments = block["segments"]
             block_paths_input = [segment["resource"] for segment in block_segments]
             block_path = os.path.join(block_dir, f"block_{block_idx + 1:04d}.mp4")
+            self.log(f"    Building block {block_idx + 1}/{len(blocks)} from {len(block_segments)} segment(s)...")
             self._concat_video_segments(block_paths_input, block_path)
             block_paths.append(block_path)
             block_durations.append(sum(segment["frame_count"] / max(self.fps, 1) for segment in block_segments))
@@ -2096,6 +2103,7 @@ class GlitchProcessor:
         if len(block_paths) == 1:
             temp_video = block_paths[0]
         else:
+            self.log("  Applying dissolve transitions between blocks...")
             xfade_inputs = []
             filter_parts = []
             output_label = None
@@ -2140,6 +2148,7 @@ class GlitchProcessor:
 
         root, ext = os.path.splitext(self.output)
         final_temp = f"{root or self.output}.tmp_{random.randint(1000, 9999)}{ext or '.mp4'}"
+        self.log("  Muxing audio...")
         result = subprocess.run([
             'ffmpeg', '-y', '-i', temp_video,
             '-i', self.audio,
