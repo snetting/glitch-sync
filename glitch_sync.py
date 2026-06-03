@@ -83,6 +83,13 @@ DEFAULT_EFFECT_TIMING = {
     "static_pan_zoom": "Clip",
 }
 DEFAULT_STYLE_NAME = "Default"
+SCENE_TRANSITION_LABELS = ("Auto", "Hard cut", "Fast fade", "Slow fade")
+SCENE_TRANSITION_AUTO_HARD_ACTIVITY = 0.68
+SCENE_TRANSITION_AUTO_FAST_ACTIVITY = 0.40
+SCENE_TRANSITION_AUTO_HARD_DELTA = 0.30
+SCENE_TRANSITION_AUTO_FAST_DELTA = 0.14
+SCENE_TRANSITION_FAST_FADE_SECONDS = 0.12
+SCENE_TRANSITION_SLOW_FADE_SECONDS = 0.28
 STYLE_CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".glitchsync_styles.json")
 RECENT_PROJECTS_PATH = os.path.join(os.path.expanduser("~"), ".glitchsync_recent_projects.json")
 RECENT_PROJECTS_LIMIT = 8
@@ -302,7 +309,8 @@ def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=T
                color_match_enabled=False, color_match_strength=0.5,
                output_resolution_label="Auto (first input)",
                export_quality_label="High quality (slower)", render_mode="Full",
-               snippet_duration=30.0, lut_path="", ai_dream_chance=0.25, ai_dream_timing="Clip"):
+               snippet_duration=30.0, lut_path="", ai_dream_chance=0.25, ai_dream_timing="Clip",
+               scene_transition_mode="Auto"):
     return {
         "export_mode_label": export_mode_label,
         "output_resolution_label": output_resolution_label,
@@ -346,7 +354,30 @@ def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=T
         "primary_focus": primary_focus,
         "ai_dream_chance": ai_dream_chance,
         "ai_dream_timing": ai_dream_timing,
+        "scene_transition_mode": scene_transition_mode if scene_transition_mode in SCENE_TRANSITION_LABELS else "Auto",
     }
+
+
+def resolve_scene_transition_mode(mode, current_activity, next_activity):
+    if mode != "Auto":
+        return mode
+    current_activity = float(np.clip(current_activity, 0, 1))
+    next_activity = float(np.clip(next_activity, 0, 1))
+    drive = max(current_activity, next_activity)
+    delta = abs(next_activity - current_activity)
+    if drive >= SCENE_TRANSITION_AUTO_HARD_ACTIVITY or delta >= SCENE_TRANSITION_AUTO_HARD_DELTA:
+        return "Hard cut"
+    if drive >= SCENE_TRANSITION_AUTO_FAST_ACTIVITY or delta >= SCENE_TRANSITION_AUTO_FAST_DELTA:
+        return "Fast fade"
+    return "Slow fade"
+
+
+def scene_transition_fade_frames(mode, fps, current_frames, next_frames=None):
+    if mode == "Hard cut":
+        return 0
+    fade_seconds = SCENE_TRANSITION_FAST_FADE_SECONDS if mode == "Fast fade" else SCENE_TRANSITION_SLOW_FADE_SECONDS
+    max_frames = current_frames if next_frames is None else min(current_frames, next_frames)
+    return max(1, min(max_frames, int(round(max(1, fps) * fade_seconds))))
 
 
 BUILTIN_STYLES = {
@@ -1541,6 +1572,60 @@ class GlitchProcessor:
         max_bass = float(np.percentile(bass_energy, 99.5))
         max_highs = float(np.percentile(highs_energy, 99.5))
         max_mids = float(np.percentile(mids_energy, 99.5))
+        segment_profiles = []
+        for i in range(len(cut_times)):
+            t_start = cut_times[i]
+            dur = (cut_times[i + 1] if i + 1 < len(cut_times) else render_duration) - t_start
+            clip_end = t_start + dur
+            profile = {
+                "index": i,
+                "t_start": t_start,
+                "dur": dur,
+                "num_frames": max(1, int(dur * self.fps)),
+                "curr_rms": norm_val(rms_energy, max_rms, t_start),
+                "clip_rms": norm_range(rms_energy, max_rms, t_start, clip_end),
+                "clip_bass": norm_range(bass_energy, max_bass, t_start, clip_end),
+                "clip_highs": norm_range(highs_energy, max_highs, t_start, clip_end),
+                "clip_mids": norm_range(mids_energy, max_mids, t_start, clip_end),
+            }
+            profile["music_energy"] = np.clip(
+                (profile["clip_rms"] * 0.55) + (profile["clip_bass"] * 0.30) + (profile["clip_highs"] * 0.15),
+                0,
+                1,
+            )
+            profile["target_brightness"] = int(np.clip(
+                ((1 - self.music_match) * profile["curr_rms"]) + (self.music_match * profile["music_energy"]),
+                0,
+                1,
+            ) * 255)
+            profile["target_brightness_norm"] = profile["target_brightness"] / 255.0
+            profile["target_activity"] = np.clip(
+                (profile["clip_rms"] * 0.45) + (profile["clip_bass"] * 0.40) + (profile["clip_highs"] * 0.15),
+                0,
+                1,
+            )
+            segment_profiles.append(profile)
+        transition_boundaries = []
+        for i in range(max(0, len(segment_profiles) - 1)):
+            current = segment_profiles[i]
+            next_profile = segment_profiles[i + 1]
+            transition_mode = resolve_scene_transition_mode(
+                self.scene_transition_mode.get(),
+                current["target_activity"],
+                next_profile["target_activity"],
+            )
+            transition_frames = scene_transition_fade_frames(
+                transition_mode,
+                self.fps,
+                current["num_frames"],
+                next_profile["num_frames"],
+            )
+            transition_boundaries.append({
+                "mode": transition_mode,
+                "frames": transition_frames,
+                "current_activity": current["target_activity"],
+                "next_activity": next_profile["target_activity"],
+            })
 
         cap = cv2.VideoCapture(self.inputs[0])
         _, first_frame = cap.read()
@@ -1577,24 +1662,26 @@ class GlitchProcessor:
             self.log(f"  Source variety: {self.source_variety:.2f}")
         if self.music_match > 0:
             self.log(f"  Music match: {self.music_match:.2f}")
+        if self.scene_transition_mode.get() == "Auto":
+            self.log("  Scene transitions: Auto (activity-driven cuts/fades)")
+        else:
+            self.log(f"  Scene transitions: {self.scene_transition_mode.get()}")
         if reference_stats and self.color_match_strength > 0:
             self.log(f"  Color reference: {os.path.basename(self.inputs[self.color_reference_idx])} ({self.color_match_strength:.2f})")
         for i in range(len(cut_times)):
             if self.stop_requested: break
-            t_start = cut_times[i]
-            dur = (cut_times[i+1] if i+1 < len(cut_times) else render_duration) - t_start
-            num_frames = max(1, int(dur * self.fps))
-            
-            curr_rms = norm_val(rms_energy, max_rms, t_start)
-            clip_end = t_start + dur
-            clip_rms = norm_range(rms_energy, max_rms, t_start, clip_end)
-            clip_bass = norm_range(bass_energy, max_bass, t_start, clip_end)
-            clip_highs = norm_range(highs_energy, max_highs, t_start, clip_end)
-            clip_mids = norm_range(mids_energy, max_mids, t_start, clip_end)
-            music_energy = np.clip((clip_rms * 0.55) + (clip_bass * 0.30) + (clip_highs * 0.15), 0, 1)
-            target_brightness = int(np.clip(((1 - self.music_match) * curr_rms) + (self.music_match * music_energy), 0, 1) * 255)
-            target_brightness_norm = target_brightness / 255.0
-            target_activity = np.clip((clip_rms * 0.45) + (clip_bass * 0.40) + (clip_highs * 0.15), 0, 1)
+            profile = segment_profiles[i]
+            t_start = profile["t_start"]
+            dur = profile["dur"]
+            num_frames = profile["num_frames"]
+            curr_rms = profile["curr_rms"]
+            clip_rms = profile["clip_rms"]
+            clip_bass = profile["clip_bass"]
+            clip_highs = profile["clip_highs"]
+            clip_mids = profile["clip_mids"]
+            target_brightness = profile["target_brightness"]
+            target_brightness_norm = profile["target_brightness_norm"]
+            target_activity = profile["target_activity"]
             self.decay_source_lock_penalties()
             ai_segment_probability = self.ai_segment_probability(clip_rms)
             if self.debug_match_logging:
@@ -1643,6 +1730,14 @@ class GlitchProcessor:
                         f"  Match {i + 1}/{len(cut_times)}: quality {segment_quality:.2f} "
                         f"(brightness {selected_brightness:.2f}/{target_brightness_norm:.2f}, "
                         f"activity {selected_activity:.2f}/{target_activity:.2f})"
+                    )
+                transition_in = transition_boundaries[i - 1] if i > 0 and i - 1 < len(transition_boundaries) else None
+                transition_out = transition_boundaries[i] if i < len(transition_boundaries) else None
+                if self.debug_match_logging and transition_out:
+                    self.log(
+                        f"  Debug transition {i + 1}->{i + 2}: {transition_out['mode'].lower()} "
+                        f"({transition_out['current_activity']:.2f} -> {transition_out['next_activity']:.2f}, "
+                        f"{transition_out['frames']} frames)"
                     )
 
                 pixelate_amount = self.effect_amount("pixelate")
@@ -1771,6 +1866,15 @@ class GlitchProcessor:
                                     f = cv2.addWeighted(f, 1 - blend, ai_anchor, blend, 0)
                     if self.lut is not None:
                         f = apply_cube_lut(f, self.lut)
+                    transition_alpha = 1.0
+                    if transition_in and transition_in["frames"] > 0 and frame_idx < transition_in["frames"]:
+                        if transition_in["frames"] > 1:
+                            transition_alpha = min(transition_alpha, frame_idx / (transition_in["frames"] - 1))
+                    if transition_out and transition_out["frames"] > 0 and frame_idx >= (len(chunk) - transition_out["frames"]):
+                        if transition_out["frames"] > 1:
+                            transition_alpha = min(transition_alpha, (len(chunk) - frame_idx - 1) / (transition_out["frames"] - 1))
+                    if transition_alpha < 1.0:
+                        f = cv2.convertScaleAbs(f, alpha=max(0.0, transition_alpha), beta=0)
                     out.write(f)
                     if self.export_mode == EXPORT_CLIP_MLT:
                         segment_frames.append(f)
@@ -1782,6 +1886,8 @@ class GlitchProcessor:
                         "timeline_in": rendered_frames,
                         "timeline_out": rendered_frames + frame_count - 1,
                         "frame_count": frame_count,
+                        "transition_in": transition_in,
+                        "transition_out": transition_out,
                     }
                     if self.export_mode == EXPORT_CUT_AWARE_MLT:
                         segment["producer"] = "video0"
@@ -1922,6 +2028,8 @@ class GlitchGUI:
         self.source_variety_label = None
         self.music_match = tk.DoubleVar(value=0.35)
         self.music_match_label = None
+        self.scene_transition_mode = tk.StringVar(value="Auto")
+        self.scene_transition_mode_label = None
         self.color_match_enabled = tk.BooleanVar(value=False)
         self.color_match_strength = tk.DoubleVar(value=0.5)
         self.color_match_strength_label = None
@@ -2206,29 +2314,33 @@ class GlitchGUI:
         music_match_scale = ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.music_match, command=lambda e: self.update_music_match_label())
         music_match_scale.grid(row=6, column=1, sticky="ew")
         self.music_match_label = ttk.Label(set_f, text="0.35"); self.music_match_label.grid(row=6, column=2)
+        scene_transition_label = ttk.Label(set_f, text="Scene transitions:")
+        scene_transition_label.grid(row=7, column=0)
+        scene_transition_combo = ttk.Combobox(set_f, textvariable=self.scene_transition_mode, values=SCENE_TRANSITION_LABELS, state="readonly")
+        scene_transition_combo.grid(row=7, column=1, sticky="ew")
         sensitivity_label = ttk.Label(set_f, text="Sensitivity:")
-        sensitivity_label.grid(row=7, column=0)
+        sensitivity_label.grid(row=8, column=0)
         sensitivity_scale = ttk.Scale(set_f, from_=0.1, to=3.0, variable=self.sensitivity, command=lambda e: self.l_sen.config(text=f"{self.sensitivity.get():.2f}"))
-        sensitivity_scale.grid(row=7, column=1, sticky="ew")
-        self.l_sen = ttk.Label(set_f, text="1.00"); self.l_sen.grid(row=7, column=2)
+        sensitivity_scale.grid(row=8, column=1, sticky="ew")
+        self.l_sen = ttk.Label(set_f, text="1.00"); self.l_sen.grid(row=8, column=2)
         fps_label = ttk.Label(set_f, text="FPS:")
-        fps_label.grid(row=8, column=0)
+        fps_label.grid(row=9, column=0)
         fps_spin = ttk.Spinbox(set_f, from_=1, to=120, textvariable=self.fps, width=5)
-        fps_spin.grid(row=8, column=1, sticky="w")
+        fps_spin.grid(row=9, column=1, sticky="w")
         style_name_label = ttk.Label(set_f, text="Style name:")
-        style_name_label.grid(row=9, column=0)
+        style_name_label.grid(row=10, column=0)
         style_name_entry = ttk.Entry(set_f, textvariable=self.style_name)
-        style_name_entry.grid(row=9, column=1, sticky="ew")
-        ttk.Button(set_f, text="Save Style", command=self.save_named_style).grid(row=9, column=2, sticky="ew")
+        style_name_entry.grid(row=10, column=1, sticky="ew")
+        ttk.Button(set_f, text="Save Style", command=self.save_named_style).grid(row=10, column=2, sticky="ew")
         load_style_label = ttk.Label(set_f, text="Load style:")
-        load_style_label.grid(row=10, column=0)
+        load_style_label.grid(row=11, column=0)
         self.style_combo = ttk.Combobox(set_f, textvariable=self.style_choice, state="readonly")
-        self.style_combo.grid(row=10, column=1, sticky="ew")
-        ttk.Button(set_f, text="Load Style", command=self.load_named_style).grid(row=10, column=2, sticky="ew")
-        ttk.Button(set_f, text="Auto Style", command=self.auto_style).grid(row=11, column=1, sticky="ew")
-        ttk.Button(set_f, text="Delete Style", command=self.delete_named_style).grid(row=11, column=2, sticky="ew")
+        self.style_combo.grid(row=11, column=1, sticky="ew")
+        ttk.Button(set_f, text="Load Style", command=self.load_named_style).grid(row=11, column=2, sticky="ew")
+        ttk.Button(set_f, text="Auto Style", command=self.auto_style).grid(row=12, column=1, sticky="ew")
+        ttk.Button(set_f, text="Delete Style", command=self.delete_named_style).grid(row=12, column=2, sticky="ew")
         self.ai_frame = ttk.LabelFrame(set_f, text="Experimental AI Stylization", padding="10")
-        self.ai_frame.grid(row=12, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        self.ai_frame.grid(row=13, column=0, columnspan=3, sticky="ew", pady=(8, 0))
         self.ai_frame.columnconfigure(1, weight=1)
         ttk.Label(self.ai_frame, text="AI stylization is enabled from the Effects panel.").grid(row=0, column=0, columnspan=2, sticky="w")
         ttk.Label(self.ai_frame, text="Easy Diffusion URL:").grid(row=1, column=0, sticky="w")
@@ -2305,6 +2417,8 @@ class GlitchGUI:
         self.add_tooltip(source_variety_scale, "Higher values spread selections across sources more aggressively.")
         self.add_tooltip(music_match_label, "Bias frame selection toward source motion that matches the audio energy.")
         self.add_tooltip(music_match_scale, "Higher values make audio energy influence source choice more strongly.")
+        self.add_tooltip(scene_transition_label, "Automatically choose hard cuts or fades from audio activity, or force a single transition style.")
+        self.add_tooltip(scene_transition_combo, "Auto favors hard cuts in active sections and longer fades in calmer sections.")
         self.add_tooltip(sensitivity_label, "Amplify or soften all enabled video effects.")
         self.add_tooltip(sensitivity_scale, "Higher values make enabled effects stronger and easier to trigger.")
         self.add_tooltip(fps_label, "Frames per second for the exported video.")
@@ -2532,6 +2646,7 @@ class GlitchGUI:
             "sensitivity": self.sensitivity.get(),
             "source_variety": self.source_variety.get(),
             "music_match": self.music_match.get(),
+            "scene_transition_mode": self.scene_transition_mode.get(),
             "color_match_enabled": self.color_match_enabled.get(),
             "color_match_strength": self.color_match_strength.get(),
             "lut_path": self.lut_path.get(),
@@ -2723,6 +2838,8 @@ class GlitchGUI:
         self.sensitivity.set(settings.get("sensitivity", self.sensitivity.get()))
         self.source_variety.set(settings.get("source_variety", self.source_variety.get()))
         self.music_match.set(settings.get("music_match", self.music_match.get()))
+        scene_transition_mode = settings.get("scene_transition_mode", self.scene_transition_mode.get())
+        self.scene_transition_mode.set(scene_transition_mode if scene_transition_mode in SCENE_TRANSITION_LABELS else "Auto")
         self.color_match_enabled.set(settings.get("color_match_enabled", self.color_match_enabled.get()))
         self.color_match_strength.set(settings.get("color_match_strength", self.color_match_strength.get()))
         self.color_reference_idx = int(settings.get("color_reference_idx", self.color_reference_idx) or 0)
