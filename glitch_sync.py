@@ -2646,7 +2646,7 @@ class GlitchGUI:
         self.resource_ram_bar.grid(row=1, column=1, sticky="ew", padx=(8, 8))
         self.resource_ram_value = ttk.Label(resource_f, text="0.0%", width=18)
         self.resource_ram_value.grid(row=1, column=2, sticky="e")
-        self.resource_temp_label = ttk.Label(resource_f, text="Temp storage:")
+        self.resource_temp_label = ttk.Label(resource_f, text="Temp:")
         self.resource_temp_label.grid(row=2, column=0, sticky="w")
         self.resource_temp_bar = ttk.Progressbar(resource_f, orient=tk.HORIZONTAL, mode="determinate", maximum=100)
         self.resource_temp_bar.grid(row=2, column=1, sticky="ew", padx=(8, 8))
@@ -2984,7 +2984,7 @@ class GlitchGUI:
                 text=f"{temp_pct:.1f}% ({human_bytes(temp_usage.used)} / {human_bytes(temp_usage.total)})"
             )
         if self.resource_temp_type:
-            self.resource_temp_type.config(text=f"Using {'RAM-backed' if temp_is_ram else 'disk-backed'} temporary storage")
+            self.resource_temp_type.config(text=f"Using {'RAM-backed' if temp_is_ram else 'disk-backed'} temp")
         self.root.after(2500, self.refresh_resource_monitor)
     def randomize_render_seed(self):
         self.render_seed.set(str(random.SystemRandom().randint(1, 2**63 - 1)))
