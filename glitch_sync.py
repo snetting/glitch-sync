@@ -303,6 +303,11 @@ def match_lab_color(frame, source_stats, reference_stats, strength):
     return cv2.cvtColor(np.clip(blended, 0, 255).astype(np.uint8), cv2.COLOR_LAB2BGR)
 
 
+def force_black_and_white(frame):
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+
 def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=True,
                beat_step=4, beat_variation=0.0, effects_enabled=None,
                effect_amounts=None, effect_timing=None,
@@ -312,7 +317,7 @@ def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=T
                output_resolution_label="Auto (first input)",
                export_quality_label="High quality (slower)", render_mode="Full",
                snippet_duration=30.0, lut_path="", ai_dream_chance=0.25, ai_dream_timing="Clip",
-               scene_transition_mode="Auto"):
+               scene_transition_mode="Auto", force_bw=False):
     return {
         "export_mode_label": export_mode_label,
         "output_resolution_label": output_resolution_label,
@@ -327,6 +332,7 @@ def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=T
         "music_match": music_match,
         "color_match_enabled": color_match_enabled,
         "color_match_strength": color_match_strength,
+        "force_bw": force_bw,
         "lut_path": lut_path,
         "beat_sync": beat_sync,
         "beat_step": beat_step,
@@ -937,6 +943,7 @@ class GlitchProcessor:
                  ai_dream_chance=0.25,
                  ai_dream_timing="Clip",
                  scene_transition_mode="Auto",
+                 force_bw=False,
                  ai_enabled=False, ai_segment_anchor_only=True, ai_backend_url=AI_DEFAULT_BACKEND_URL,
                  ai_prompt=AI_DEFAULT_PROMPT, ai_negative_prompt=AI_DEFAULT_NEGATIVE_PROMPT,
                  ai_every_n_frames=AI_DEFAULT_EVERY_N_FRAMES, ai_denoise=AI_DEFAULT_DENOISE,
@@ -967,6 +974,7 @@ class GlitchProcessor:
         self.export_quality_label = export_quality_label
         self.experimental_mode = bool(experimental_mode)
         self.scene_transition_mode = scene_transition_mode if scene_transition_mode in SCENE_TRANSITION_LABELS else "Auto"
+        self.force_bw = bool(force_bw)
         self.ai_dream_chance = float(np.clip(ai_dream_chance, 0.0, 1.0))
         self.ai_dream_timing = ai_dream_timing if ai_dream_timing in AI_DREAM_TIMING_LABELS else "Clip"
         self.ai_enabled = bool(ai_enabled)
@@ -2128,6 +2136,8 @@ class GlitchProcessor:
                                 f = cv2.addWeighted(f, 1 - blend, ai_anchor, blend, 0)
                 if self.lut is not None:
                     f = apply_cube_lut(f, self.lut)
+                if self.force_bw:
+                    f = force_black_and_white(f)
                 segment_frame = f
                 if out is not None:
                     transition_alpha = 1.0
@@ -2449,6 +2459,7 @@ class GlitchGUI:
         self.color_match_enabled = tk.BooleanVar(value=False)
         self.color_match_strength = tk.DoubleVar(value=0.5)
         self.color_match_strength_label = None
+        self.force_bw = tk.BooleanVar(value=False)
         self.color_reference_idx = 0
         self.color_reference_label = tk.StringVar(value="Reference: first input")
         self.lut_path = tk.StringVar()
@@ -2693,11 +2704,14 @@ class GlitchGUI:
         ttk.Entry(lut_controls, textvariable=self.lut_path).grid(row=0, column=0, sticky="ew")
         ttk.Button(lut_controls, text="...", command=self.pick_lut, width=3).grid(row=0, column=1, padx=(5, 0))
         ttk.Button(lut_controls, text="Clear", command=self.clear_lut).grid(row=0, column=2, padx=(5, 0))
+        force_bw_cb = ttk.Checkbutton(io, text="Force black & white", variable=self.force_bw)
+        force_bw_cb.grid(row=14, column=0, columnspan=3, sticky="w")
         self.add_tooltip(render_seed_entry, "Leave blank for a fresh random seed. Enter a number to reproduce the same render later.")
         self.add_tooltip(seed_copy_button, "Copy the current seed to the clipboard.")
         self.add_tooltip(seed_randomize_button, "Fill the seed field with a new random value.")
         self.add_tooltip(use_last_seed_button, "Restore the seed from the most recent render in this session.")
         self.add_tooltip(export_mode_combo, "Full Timeline bakes GlitchSync effects and transitions into rendered segment clips for a multi-track Shotcut project. Source Clips keeps the project editable from original clips, but does not include the full rendered transition look.")
+        self.add_tooltip(force_bw_cb, "Convert the final output to black and white after all other effects and color matching have been applied.")
         self.render_seed.trace_add("write", lambda *_: self.update_render_seed_status())
         self.update_render_seed_status()
 
@@ -3214,6 +3228,7 @@ class GlitchGUI:
             "scene_transition_mode": self.scene_transition_mode.get(),
             "color_match_enabled": self.color_match_enabled.get(),
             "color_match_strength": self.color_match_strength.get(),
+            "force_bw": self.force_bw.get(),
             "lut_path": self.lut_path.get(),
             "beat_sync": self.beat_sync.get(),
             "beat_step": self.beat_step.get(),
@@ -3407,6 +3422,7 @@ class GlitchGUI:
         self.scene_transition_mode.set(scene_transition_mode if scene_transition_mode in SCENE_TRANSITION_LABELS else "Auto")
         self.color_match_enabled.set(settings.get("color_match_enabled", self.color_match_enabled.get()))
         self.color_match_strength.set(settings.get("color_match_strength", self.color_match_strength.get()))
+        self.force_bw.set(settings.get("force_bw", self.force_bw.get()))
         self.color_reference_idx = int(settings.get("color_reference_idx", self.color_reference_idx) or 0)
         self.update_color_reference_label(settings.get("color_reference_label", self.color_reference_label.get()))
         self.lut_path.set(settings.get("lut_path", self.lut_path.get()))
@@ -3689,6 +3705,7 @@ class GlitchGUI:
                 self.ai_dream_chance.get(),
                 self.ai_dream_timing.get(),
                 self.scene_transition_mode.get(),
+                self.force_bw.get(),
                 self.ai_enabled.get(),
                 self.ai_segment_anchor_only.get(),
                 self.ai_backend_url.get(),
@@ -3730,6 +3747,8 @@ class GlitchGUI:
     def _render_finished_ui(self):
         self.pg.stop(); self.pg.config(mode='determinate'); self.btn.config(state=tk.NORMAL); self.stop_btn.config(state=tk.DISABLED); self.pg['value'] = 0
     def display_frame(self, f):
+        if getattr(self, "force_bw", None) is not None and self.force_bw.get():
+            f = force_black_and_white(f)
         h, w = f.shape[:2]
         canvas_w = max(1, int(self.cv.winfo_width() or self.cv.winfo_reqwidth() or 480))
         canvas_h = max(1, int(self.cv.winfo_height() or self.cv.winfo_reqheight() or 220))
@@ -3755,6 +3774,7 @@ if __name__ == "__main__":
     p.add_argument("--beat-variation", type=float, default=0.0)
     p.add_argument("--render-limit", type=float)
     p.add_argument("--music-match", type=float, default=0.35)
+    p.add_argument("--force-bw", action="store_true")
     p.add_argument("--seed", type=int)
     args = p.parse_args()
     if args.gui or not (args.inputs and args.audio):
@@ -3763,5 +3783,5 @@ if __name__ == "__main__":
         if args.seed is not None:
             random.seed(args.seed)
             np.random.seed(int(args.seed) % (2**32))
-        proc = GlitchProcessor(args.inputs, args.audio, args.output, beat_sync=args.beat_sync, export_mode=args.export_mode, progress_callback=lambda c, t: print(f"Progress: {c}/{t}", end='\r'), beat_step=args.beat_step, beat_variation=args.beat_variation, render_limit=args.render_limit, music_match=args.music_match, export_quality_label=args.export_quality, render_seed=args.seed)
+        proc = GlitchProcessor(args.inputs, args.audio, args.output, beat_sync=args.beat_sync, export_mode=args.export_mode, progress_callback=lambda c, t: print(f"Progress: {c}/{t}", end='\r'), beat_step=args.beat_step, beat_variation=args.beat_variation, render_limit=args.render_limit, music_match=args.music_match, export_quality_label=args.export_quality, force_bw=args.force_bw, render_seed=args.seed)
         proc.process()
