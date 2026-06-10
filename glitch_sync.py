@@ -408,6 +408,51 @@ def preferred_temp_root():
     return None
 
 
+def memory_snapshot():
+    try:
+        mem = psutil.virtual_memory()
+        try:
+            rss = psutil.Process(os.getpid()).memory_info().rss
+        except Exception:
+            rss = 0
+        return {
+            "total": int(mem.total),
+            "available": int(mem.available),
+            "percent": float(mem.percent),
+            "rss": int(rss),
+        }
+    except Exception:
+        return None
+
+
+def memory_pressure_report(snapshot=None):
+    snapshot = snapshot or memory_snapshot()
+    if not snapshot:
+        return {"pressure": False, "reasons": [], "snapshot": None}
+    total = max(1, int(snapshot.get("total") or 0))
+    available = max(0, int(snapshot.get("available") or 0))
+    used_percent = float(snapshot.get("percent") or 0.0)
+    rss = max(0, int(snapshot.get("rss") or 0))
+    available_ratio = available / total
+    rss_ratio = rss / total
+    reasons = []
+    if available < 12 * 1024 ** 3:
+        reasons.append(f"available RAM below {human_bytes(12 * 1024 ** 3)}")
+    if available_ratio < 0.20:
+        reasons.append(f"available RAM below {available_ratio * 100:.1f}%")
+    if used_percent >= 80.0:
+        reasons.append(f"system RAM usage at {used_percent:.1f}%")
+    if rss_ratio >= 0.35:
+        reasons.append(f"process RSS at {rss_ratio * 100:.1f}% of total")
+    return {"pressure": bool(reasons), "reasons": reasons, "snapshot": snapshot}
+
+
+def select_temp_root_for_render(memory_pressure=False):
+    if memory_pressure:
+        return tempfile.gettempdir()
+    return preferred_temp_root() or tempfile.gettempdir()
+
+
 def human_bytes(num):
     num = float(num or 0)
     for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
@@ -1713,9 +1758,22 @@ class GlitchProcessor:
     def process(self):
         package_dir = None
         clip_dir = None
-        temp_root = self.temp_root or preferred_temp_root() or tempfile.gettempdir()
+        memory_state = memory_pressure_report()
+        temp_root = self.temp_root or select_temp_root_for_render(memory_state["pressure"])
+        if memory_state["pressure"] and temp_root in ("/dev/shm", "/run/shm"):
+            temp_root = tempfile.gettempdir()
+        self.temp_root = temp_root
         seed = self.initialize_rng()
         self.log(f"  Render seed: {seed}")
+        if memory_state.get("snapshot"):
+            snapshot = memory_state["snapshot"]
+            self.log(
+                "  Memory snapshot: "
+                f"available {human_bytes(snapshot.get('available'))} / {human_bytes(snapshot.get('total'))}, "
+                f"process RSS {human_bytes(snapshot.get('rss'))}"
+            )
+        if memory_state["pressure"]:
+            self.log(f"  Memory pressure detected: {', '.join(memory_state['reasons'])}")
         if temp_root in ("/dev/shm", "/run/shm"):
             self.log(f"  Temporary storage: RAM-backed ({temp_root})")
         else:
@@ -2255,6 +2313,16 @@ class GlitchProcessor:
 
         preset, crf = self.export_quality_args()
         self.log(f"  Export quality: {self.export_quality_label} (preset {preset}, CRF {crf})")
+        memory_state = memory_pressure_report()
+        snapshot = memory_state.get("snapshot") or {}
+        if snapshot:
+            self.log(
+                "  Memory snapshot: "
+                f"available {human_bytes(snapshot.get('available'))} / {human_bytes(snapshot.get('total'))}, "
+                f"process RSS {human_bytes(snapshot.get('rss'))}"
+            )
+        if memory_state["pressure"]:
+            self.log(f"  Memory pressure detected: {', '.join(memory_state['reasons'])}")
         work_dir = os.path.join(package_dir, "media")
         block_dir = os.path.join(work_dir, "blocks")
         os.makedirs(block_dir, exist_ok=True)
@@ -2276,9 +2344,11 @@ class GlitchProcessor:
         block_paths = []
         block_durations = []
         self.log(f"  Assembling {len(blocks)} transition block(s)...")
-        block_worker_count = min(max(1, os.cpu_count() or 1), max(1, min(len(blocks), 4)))
+        block_worker_count = 1 if memory_state["pressure"] else min(max(1, os.cpu_count() or 1), max(1, min(len(blocks), 4)))
         if block_worker_count > 1 and len(blocks) > 1:
             self.log(f"  Parallel block assembly with {block_worker_count} workers...")
+        elif memory_state["pressure"]:
+            self.log("  Memory pressure: forcing sequential block assembly.")
         block_results = [None] * len(blocks)
         with ThreadPoolExecutor(max_workers=block_worker_count) as executor:
             future_to_idx = {}
@@ -2302,7 +2372,7 @@ class GlitchProcessor:
 
         if len(block_paths) == 1:
             temp_video = block_paths[0]
-        else:
+        elif len(block_paths) == 2:
             self.log("  Applying dissolve transitions between blocks...")
             xfade_inputs = []
             filter_parts = []
@@ -2345,6 +2415,9 @@ class GlitchProcessor:
             ], capture_output=True)
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.decode(errors="ignore") or "ffmpeg failed while assembling dissolve transitions")
+        else:
+            self.log("  Applying sequential dissolve transitions between blocks...")
+            temp_video = self._xfade_block_chain(block_paths, block_durations, blocks, work_dir, preset, crf)
 
         root, ext = os.path.splitext(self.output)
         final_temp = f"{root or self.output}.tmp_{random.randint(1000, 9999)}{ext or '.mp4'}"
@@ -2363,6 +2436,63 @@ class GlitchProcessor:
                 os.remove(final_temp)
             raise RuntimeError(result.stderr.decode(errors="ignore") or "ffmpeg failed while muxing final audio")
         os.replace(final_temp, self.output)
+
+    def _xfade_block_chain(self, block_paths, block_durations, blocks, work_dir, preset, crf):
+        if len(block_paths) < 2:
+            raise RuntimeError("Need at least two blocks to apply dissolves")
+        current_path = block_paths[0]
+        current_duration = float(block_durations[0])
+        for idx in range(len(block_paths) - 1):
+            transition = blocks[idx].get("transition") or {}
+            mode = transition.get("mode", "Fast fade")
+            xfade_name = scene_transition_ffmpeg_name(mode) or "fade"
+            transition_frames = max(1, int(transition.get("frames", 1)))
+            duration_seconds = transition_frames / max(self.fps, 1)
+            offset = max(0.0, current_duration - duration_seconds)
+            next_path = block_paths[idx + 1]
+            next_duration = float(block_durations[idx + 1])
+            temp_fd, temp_output = tempfile.mkstemp(
+                suffix=".mp4",
+                prefix=f"glitchsync_xfade_{idx + 1:04d}_",
+                dir=work_dir,
+            )
+            os.close(temp_fd)
+            self.log(
+                f"    Dissolving block {idx + 1}/{len(block_paths) - 1} "
+                f"({os.path.basename(current_path)} + {os.path.basename(next_path)})..."
+            )
+            result = subprocess.run([
+                'ffmpeg', '-y',
+                '-i', current_path,
+                '-i', next_path,
+                '-filter_complex', (
+                    f"[0:v][1:v]xfade=transition={xfade_name}:"
+                    f"duration={duration_seconds:.6f}:offset={offset:.6f}[v]"
+                ),
+                '-map', '[v]',
+                '-an',
+                '-c:v', 'libx264',
+                '-preset', preset,
+                '-crf', crf,
+                '-pix_fmt', 'yuv420p',
+                temp_output,
+            ], capture_output=True)
+            if result.returncode != 0:
+                try:
+                    if os.path.exists(temp_output):
+                        os.remove(temp_output)
+                except Exception:
+                    pass
+                raise RuntimeError(result.stderr.decode(errors="ignore") or "ffmpeg failed while assembling dissolve transitions")
+            if current_path not in block_paths:
+                try:
+                    if os.path.exists(current_path):
+                        os.remove(current_path)
+                except Exception:
+                    pass
+            current_path = temp_output
+            current_duration = current_duration + next_duration - duration_seconds
+        return current_path
 
     def export_shotcut_archive(self, temp_video, segments, width, height, package_dir=None):
         if not segments:
@@ -2419,6 +2549,9 @@ class GlitchGUI:
         initial_h = min(1500, max(1100, screen_h - 40))
         self.root.geometry(f"{initial_w}x{initial_h}")
         self.root.minsize(1100, 1040)
+        self.resource_style = ttk.Style(self.root)
+        self.resource_style.configure("Resource.TProgressbar", troughcolor="#2a2a2a", background="#4caf50")
+        self.resource_style.configure("ResourcePressure.TProgressbar", troughcolor="#2a2a2a", background="#d83b3b")
         self.inputs, self.audio = [], tk.StringVar()
         self.output = tk.StringVar(value=f"glitch_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
         self.output_auto_managed = True
@@ -2730,25 +2863,25 @@ class GlitchGUI:
         resource_f.columnconfigure(1, weight=1)
         self.resource_cpu_label = ttk.Label(resource_f, text="CPU:")
         self.resource_cpu_label.grid(row=0, column=0, sticky="w")
-        self.resource_cpu_bar = ttk.Progressbar(resource_f, orient=tk.HORIZONTAL, mode="determinate", maximum=100)
+        self.resource_cpu_bar = ttk.Progressbar(resource_f, orient=tk.HORIZONTAL, mode="determinate", maximum=100, style="Resource.TProgressbar")
         self.resource_cpu_bar.grid(row=0, column=1, sticky="ew", padx=(8, 8))
         self.resource_cpu_value = ttk.Label(resource_f, text="0.0%", width=18)
         self.resource_cpu_value.grid(row=0, column=2, sticky="e")
         self.resource_ram_label = ttk.Label(resource_f, text="RAM:")
         self.resource_ram_label.grid(row=1, column=0, sticky="w")
-        self.resource_ram_bar = ttk.Progressbar(resource_f, orient=tk.HORIZONTAL, mode="determinate", maximum=100)
+        self.resource_ram_bar = ttk.Progressbar(resource_f, orient=tk.HORIZONTAL, mode="determinate", maximum=100, style="Resource.TProgressbar")
         self.resource_ram_bar.grid(row=1, column=1, sticky="ew", padx=(8, 8))
         self.resource_ram_value = ttk.Label(resource_f, text="0.0%", width=18)
         self.resource_ram_value.grid(row=1, column=2, sticky="e")
         self.resource_gpu_label = ttk.Label(resource_f, text="GPU:")
         self.resource_gpu_label.grid(row=2, column=0, sticky="w")
-        self.resource_gpu_bar = ttk.Progressbar(resource_f, orient=tk.HORIZONTAL, mode="determinate", maximum=100)
+        self.resource_gpu_bar = ttk.Progressbar(resource_f, orient=tk.HORIZONTAL, mode="determinate", maximum=100, style="Resource.TProgressbar")
         self.resource_gpu_bar.grid(row=2, column=1, sticky="ew", padx=(8, 8))
         self.resource_gpu_value = ttk.Label(resource_f, text="0.0%", width=18)
         self.resource_gpu_value.grid(row=2, column=2, sticky="e")
         self.resource_temp_label = ttk.Label(resource_f, text="Disk:")
         self.resource_temp_label.grid(row=3, column=0, sticky="w")
-        self.resource_temp_bar = ttk.Progressbar(resource_f, orient=tk.HORIZONTAL, mode="determinate", maximum=100)
+        self.resource_temp_bar = ttk.Progressbar(resource_f, orient=tk.HORIZONTAL, mode="determinate", maximum=100, style="Resource.TProgressbar")
         self.resource_temp_bar.grid(row=3, column=1, sticky="ew", padx=(8, 8))
         self.resource_temp_value = ttk.Label(resource_f, text="0.0%", width=18)
         self.resource_temp_value.grid(row=3, column=2, sticky="e")
@@ -3060,6 +3193,10 @@ class GlitchGUI:
             return sum(values) / len(values)
         except Exception:
             return None
+    def set_resource_bar_state(self, bar, pressure=False):
+        if bar is None:
+            return
+        bar.configure(style="ResourcePressure.TProgressbar" if pressure else "Resource.TProgressbar")
     def init_resource_monitor(self):
         self.temp_storage_root = preferred_temp_root() or tempfile.gettempdir()
         if hasattr(psutil, "cpu_percent"):
@@ -3071,18 +3208,22 @@ class GlitchGUI:
         if not getattr(self, "active_processor", None):
             if self.resource_cpu_bar:
                 self.resource_cpu_bar["value"] = 0
+                self.set_resource_bar_state(self.resource_cpu_bar, False)
             if self.resource_cpu_value:
                 self.resource_cpu_value.config(text="0.0%")
             if self.resource_ram_bar:
                 self.resource_ram_bar["value"] = 0
+                self.set_resource_bar_state(self.resource_ram_bar, False)
             if self.resource_ram_value:
                 self.resource_ram_value.config(text="0.0%")
             if self.resource_gpu_bar:
                 self.resource_gpu_bar["value"] = 0
+                self.set_resource_bar_state(self.resource_gpu_bar, False)
             if self.resource_gpu_value:
                 self.resource_gpu_value.config(text="0.0%")
             if self.resource_temp_bar:
                 self.resource_temp_bar["value"] = 0
+                self.set_resource_bar_state(self.resource_temp_bar, False)
             if self.resource_temp_value:
                 self.resource_temp_value.config(text="0.0%")
             if self.resource_temp_type:
@@ -3099,23 +3240,33 @@ class GlitchGUI:
             temp_usage = shutil.disk_usage(temp_root)
             temp_pct = (temp_usage.used / temp_usage.total * 100.0) if temp_usage.total else 0.0
             temp_is_ram = temp_root in ("/dev/shm", "/run/shm")
+            proc_rss = 0
+            try:
+                proc_rss = psutil.Process(os.getpid()).memory_info().rss
+            except Exception:
+                proc_rss = 0
+            memory_pressure = memory_pressure_report({"total": int(mem.total), "available": int(mem.available), "percent": float(mem.percent), "rss": proc_rss})
         except Exception:
             self.root.after(1000, self.refresh_resource_monitor)
             return
         if self.resource_cpu_bar:
             self.resource_cpu_bar["value"] = max(0.0, min(100.0, cpu_pct))
+            self.set_resource_bar_state(self.resource_cpu_bar, cpu_pct >= 90.0)
         if self.resource_cpu_value:
             self.resource_cpu_value.config(text=f"{cpu_pct:.1f}%")
         if self.resource_ram_bar:
             self.resource_ram_bar["value"] = max(0.0, min(100.0, float(mem.percent)))
+            self.set_resource_bar_state(self.resource_ram_bar, float(mem.percent) >= 82.0 or memory_pressure["pressure"])
         if self.resource_ram_value:
             self.resource_ram_value.config(text=f"{mem.percent:.1f}% ({human_bytes(mem.used)} / {human_bytes(mem.total)})")
         if self.resource_gpu_bar:
             self.resource_gpu_bar["value"] = max(0.0, min(100.0, float(gpu_pct)))
+            self.set_resource_bar_state(self.resource_gpu_bar, float(gpu_pct) >= 90.0)
         if self.resource_gpu_value:
             self.resource_gpu_value.config(text=f"{gpu_pct:.1f}%")
         if self.resource_temp_bar:
             self.resource_temp_bar["value"] = max(0.0, min(100.0, temp_pct))
+            self.set_resource_bar_state(self.resource_temp_bar, temp_pct >= 90.0)
         if self.resource_temp_value:
             self.resource_temp_value.config(
                 text=f"{temp_pct:.1f}% ({human_bytes(temp_usage.used)} / {human_bytes(temp_usage.total)})"
@@ -3664,6 +3815,8 @@ class GlitchGUI:
                 seed = random.SystemRandom().randint(1, 2**63 - 1)
                 self.render_seed.set(str(seed))
             self.last_render_seed = seed
+            memory_state = memory_pressure_report()
+            self.temp_storage_root = select_temp_root_for_render(memory_state["pressure"])
             p = GlitchProcessor(
                 self.inputs,
                 self.audio.get(),
