@@ -2550,6 +2550,10 @@ class GlitchGUI:
         self.root.geometry(f"{initial_w}x{initial_h}")
         self.root.minsize(1100, 1040)
         self.resource_style = ttk.Style(self.root)
+        base_bar_layout = self.resource_style.layout("Horizontal.TProgressbar")
+        if base_bar_layout:
+            self.resource_style.layout("Horizontal.Resource.TProgressbar", base_bar_layout)
+            self.resource_style.layout("Horizontal.ResourcePressure.TProgressbar", base_bar_layout)
         self.resource_style.configure("Resource.TProgressbar", troughcolor="#2a2a2a", background="#4caf50")
         self.resource_style.configure("ResourcePressure.TProgressbar", troughcolor="#2a2a2a", background="#d83b3b")
         self.inputs, self.audio = [], tk.StringVar()
