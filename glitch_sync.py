@@ -2442,6 +2442,12 @@ class GlitchProcessor:
             raise RuntimeError("Need at least two blocks to apply dissolves")
         current_path = block_paths[0]
         current_duration = float(block_durations[0])
+        def remove_if_exists(path):
+            try:
+                if path and os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
         for idx in range(len(block_paths) - 1):
             transition = blocks[idx].get("transition") or {}
             mode = transition.get("mode", "Fast fade")
@@ -2479,17 +2485,12 @@ class GlitchProcessor:
             ], capture_output=True)
             if result.returncode != 0:
                 try:
-                    if os.path.exists(temp_output):
-                        os.remove(temp_output)
+                    remove_if_exists(temp_output)
                 except Exception:
                     pass
                 raise RuntimeError(result.stderr.decode(errors="ignore") or "ffmpeg failed while assembling dissolve transitions")
-            if current_path not in block_paths:
-                try:
-                    if os.path.exists(current_path):
-                        os.remove(current_path)
-                except Exception:
-                    pass
+            remove_if_exists(current_path)
+            remove_if_exists(next_path)
             current_path = temp_output
             current_duration = current_duration + next_duration - duration_seconds
         return current_path
