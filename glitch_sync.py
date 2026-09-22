@@ -29,6 +29,8 @@ import requests
 from requests import Response
 import psutil
 
+APP_VERSION = "0.8.0"
+
 EXPORT_FINAL_VIDEO = "final_video"
 EXPORT_CUT_AWARE_MLT = "cut_aware_mlt"
 EXPORT_CLIP_MLT = "clip_mlt"
@@ -61,10 +63,10 @@ EFFECT_NAMES = (
 )
 DEFAULT_EFFECT_AMOUNTS = {
     "pixelate": 0.7,
-    "flash": 0.6,
+    "flash": 0.35,
     "rewind": 0.25,
     "rgb_shift": 0.6,
-    "shake": 0.5,
+    "shake": 0.35,
     "ghosting": 0.55,
     "monochrome": 0.35,
     "hue_shift": 0.35,
@@ -103,6 +105,8 @@ SOURCE_LOCK_TRIGGER_STREAK = 4
 SOURCE_LOCK_PENALTY_START = 4.0
 SOURCE_LOCK_PENALTY_DECAY = 0.82
 SOURCE_LOCK_PENALTY_MAX = 10.0
+SOURCE_BACKOFF_PENALTY_DECAY = 0.82
+SOURCE_BACKOFF_PENALTY_MAX = 12.0
 AI_DEFAULT_BACKEND_URL = "http://127.0.0.1:9000"
 AI_DEFAULT_PROMPT = "dreamlike transformation of the input image, preserve the original subject and composition, and reimagine it as a surreal cinematic dream scene with soft painterly detail"
 AI_DEFAULT_NEGATIVE_PROMPT = "blurry, low quality, watermark, text"
@@ -313,6 +317,7 @@ def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=T
                effect_amounts=None, effect_timing=None,
                primary_enabled=False, primary_focus=0.75,
                export_mode_label="Final video (MP4)", source_variety=0.0, music_match=0.35,
+               backoff=0.0,
                color_match_enabled=False, color_match_strength=0.5,
                output_resolution_label="Auto (first input)",
                export_quality_label="High quality (slower)", render_mode="Full",
@@ -328,6 +333,7 @@ def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=T
         "snippet_duration": snippet_duration,
         "coherence": coherence,
         "sensitivity": sensitivity,
+        "backoff": backoff,
         "source_variety": source_variety,
         "music_match": music_match,
         "color_match_enabled": color_match_enabled,
@@ -335,7 +341,7 @@ def make_style(duration=0.1, fps=30, coherence=0.2, sensitivity=1.0, beat_sync=T
         "force_bw": force_bw,
         "lut_path": lut_path,
         "beat_sync": beat_sync,
-        "beat_step": beat_step,
+        "beat_step": int(beat_step),
         "beat_variation": beat_variation,
         "effects_enabled": {
             "pixelate": True,
@@ -408,6 +414,18 @@ def preferred_temp_root():
     return None
 
 
+def normalize_temp_storage_root(path):
+    if not path:
+        return None
+    try:
+        path = os.path.abspath(os.path.expanduser(str(path).strip()))
+        if os.path.isdir(path) and os.access(path, os.W_OK | os.X_OK):
+            return path
+    except Exception:
+        pass
+    return None
+
+
 def memory_snapshot():
     try:
         mem = psutil.virtual_memory()
@@ -451,6 +469,22 @@ def select_temp_root_for_render(memory_pressure=False):
     if memory_pressure:
         return tempfile.gettempdir()
     return preferred_temp_root() or tempfile.gettempdir()
+
+
+def select_package_root_for_render(expected_bytes=0, preferred_root=None):
+    disk_root = tempfile.gettempdir()
+    preferred_root = normalize_temp_storage_root(preferred_root)
+    candidates = [root for root in (preferred_root, preferred_temp_root()) if root]
+    for root in candidates:
+        try:
+            if expected_bytes <= 0:
+                return root
+            root_free = shutil.disk_usage(root).free
+            if expected_bytes <= int(root_free * 0.60):
+                return root
+        except Exception:
+            continue
+    return disk_root
 
 
 def human_bytes(num):
@@ -522,11 +556,12 @@ BUILTIN_STYLES = {
         sensitivity=0.55,
         source_variety=0.35,
         music_match=0.25,
+        backoff=0.15,
         color_match_strength=0.55,
-        beat_step=8,
-        beat_variation=0.12,
+        beat_step=12,
+        beat_variation=0.22,
         effects_enabled={"monochrome": True, "vignette": True, "static_pan_zoom": True},
-        effect_amounts={"pixelate": 0.25, "flash": 0.18, "rewind": 0.1, "rgb_shift": 0.2, "shake": 0.15, "ghosting": 0.7, "monochrome": 0.28, "hue_shift": 0.0, "vignette": 0.35, "static_pan_zoom": 0.45},
+        effect_amounts={"pixelate": 0.25, "flash": 0.16, "rewind": 0.1, "rgb_shift": 0.2, "shake": 0.12, "ghosting": 0.7, "monochrome": 0.28, "hue_shift": 0.0, "vignette": 0.35, "static_pan_zoom": 0.45},
         effect_timing={"pixelate": "Clip", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Clip", "shake": "Clip", "ghosting": "Clip", "monochrome": "Clip", "hue_shift": "Clip", "vignette": "Clip", "static_pan_zoom": "Clip"},
         primary_focus=0.9,
         ai_dream_chance=0.20,
@@ -538,11 +573,12 @@ BUILTIN_STYLES = {
         sensitivity=0.9,
         source_variety=0.55,
         music_match=0.45,
+        backoff=0.2,
         color_match_strength=0.5,
         beat_step=4,
-        beat_variation=0.25,
+        beat_variation=0.30,
         effects_enabled={"hue_shift": True, "vignette": True},
-        effect_amounts={"pixelate": 0.5, "flash": 0.55, "rewind": 0.2, "rgb_shift": 0.65, "shake": 0.45, "ghosting": 0.5, "monochrome": 0.0, "hue_shift": 0.22, "vignette": 0.25, "static_pan_zoom": 0.35},
+        effect_amounts={"pixelate": 0.45, "flash": 0.35, "rewind": 0.2, "rgb_shift": 0.6, "shake": 0.35, "ghosting": 0.5, "monochrome": 0.0, "hue_shift": 0.22, "vignette": 0.25, "static_pan_zoom": 0.35},
         effect_timing={"pixelate": "Random", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Random", "shake": "Frame", "ghosting": "Random", "monochrome": "Clip", "hue_shift": "Random", "vignette": "Random", "static_pan_zoom": "Clip"},
         ai_dream_chance=0.22,
         ai_dream_timing="Clip",
@@ -553,11 +589,12 @@ BUILTIN_STYLES = {
         sensitivity=1.35,
         source_variety=0.7,
         music_match=0.7,
+        backoff=0.3,
         color_match_strength=0.45,
-        beat_step=2,
-        beat_variation=0.45,
+        beat_step=6,
+        beat_variation=0.48,
         effects_enabled={"hue_shift": True, "vignette": True},
-        effect_amounts={"pixelate": 1.2, "flash": 1.25, "rewind": 0.45, "rgb_shift": 1.25, "shake": 1.1, "ghosting": 0.65, "monochrome": 0.0, "hue_shift": 0.75, "vignette": 0.45, "static_pan_zoom": 0.25},
+        effect_amounts={"pixelate": 1.05, "flash": 0.45, "rewind": 0.45, "rgb_shift": 1.1, "shake": 0.45, "ghosting": 0.65, "monochrome": 0.0, "hue_shift": 0.75, "vignette": 0.45, "static_pan_zoom": 0.25},
         effect_timing={"pixelate": "Random", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Frame", "shake": "Frame", "ghosting": "Random", "monochrome": "Clip", "hue_shift": "Frame", "vignette": "Random", "static_pan_zoom": "Clip"},
         ai_dream_chance=0.30,
         ai_dream_timing="Clip",
@@ -568,11 +605,12 @@ BUILTIN_STYLES = {
         sensitivity=1.15,
         source_variety=0.6,
         music_match=0.65,
+        backoff=0.25,
         color_match_strength=0.45,
-        beat_step=2,
-        beat_variation=0.25,
+        beat_step=6,
+        beat_variation=0.42,
         effects_enabled={"monochrome": True, "vignette": True},
-        effect_amounts={"pixelate": 0.65, "flash": 0.6, "rewind": 0.25, "rgb_shift": 0.65, "shake": 1.25, "ghosting": 0.35, "monochrome": 0.25, "hue_shift": 0.0, "vignette": 0.55, "static_pan_zoom": 0.25},
+        effect_amounts={"pixelate": 0.65, "flash": 0.4, "rewind": 0.25, "rgb_shift": 0.65, "shake": 0.45, "ghosting": 0.35, "monochrome": 0.25, "hue_shift": 0.0, "vignette": 0.55, "static_pan_zoom": 0.25},
         effect_timing={"pixelate": "Random", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Random", "shake": "Frame", "ghosting": "Frame", "monochrome": "Random", "hue_shift": "Clip", "vignette": "Clip", "static_pan_zoom": "Clip"},
         ai_dream_chance=0.18,
         ai_dream_timing="Clip",
@@ -584,11 +622,12 @@ BUILTIN_STYLES = {
         sensitivity=0.4,
         source_variety=0.25,
         music_match=0.2,
+        backoff=0.2,
         color_match_strength=0.6,
-        beat_step=16,
-        beat_variation=0.05,
+        beat_step=20,
+        beat_variation=0.10,
         effects_enabled={"pixelate": False, "rewind": False, "shake": False, "monochrome": True, "vignette": True, "static_pan_zoom": True},
-        effect_amounts={"pixelate": 0.0, "flash": 0.1, "rewind": 0.0, "rgb_shift": 0.12, "shake": 0.0, "ghosting": 1.2, "monochrome": 0.35, "hue_shift": 0.0, "vignette": 0.3, "static_pan_zoom": 0.75},
+        effect_amounts={"pixelate": 0.0, "flash": 0.08, "rewind": 0.0, "rgb_shift": 0.12, "shake": 0.0, "ghosting": 1.2, "monochrome": 0.35, "hue_shift": 0.0, "vignette": 0.3, "static_pan_zoom": 0.75},
         effect_timing={"pixelate": "Clip", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Clip", "shake": "Clip", "ghosting": "Clip", "monochrome": "Clip", "hue_shift": "Clip", "vignette": "Clip", "static_pan_zoom": "Clip"},
         primary_focus=0.95,
         ai_dream_chance=0.65,
@@ -600,11 +639,12 @@ BUILTIN_STYLES = {
         sensitivity=1.75,
         source_variety=0.8,
         music_match=0.75,
+        backoff=0.4,
         color_match_strength=0.35,
-        beat_step=1,
-        beat_variation=0.0,
+        beat_step=4,
+        beat_variation=0.28,
         effects_enabled={"hue_shift": True, "vignette": True},
-        effect_amounts={"pixelate": 1.7, "flash": 1.15, "rewind": 0.8, "rgb_shift": 1.8, "shake": 1.4, "ghosting": 1.0, "monochrome": 0.0, "hue_shift": 0.9, "vignette": 0.65, "static_pan_zoom": 0.2},
+        effect_amounts={"pixelate": 1.7, "flash": 0.5, "rewind": 0.8, "rgb_shift": 1.8, "shake": 0.5, "ghosting": 1.0, "monochrome": 0.0, "hue_shift": 0.9, "vignette": 0.65, "static_pan_zoom": 0.2},
         effect_timing={"pixelate": "Random", "flash": "Frame", "rewind": "Clip", "rgb_shift": "Random", "shake": "Frame", "ghosting": "Random", "monochrome": "Clip", "hue_shift": "Random", "vignette": "Random", "static_pan_zoom": "Clip"},
         ai_dream_chance=0.24,
         ai_dream_timing="Clip",
@@ -980,7 +1020,7 @@ class GlitchProcessor:
                  progress_callback=None, log_callback=None, frame_callback=None,
                  effect_amounts=None, primary_video_idx=None, primary_focus=0.0,
                  beat_step=4, beat_variation=0.0, render_limit=None,
-                 source_variety=0.0, music_match=0.35,
+                 source_variety=0.0, music_match=0.35, backoff=0.0,
                  color_reference_idx=None, color_match_strength=0.0,
                  lut_path="", output_resolution=None, export_quality_label="High quality (slower)",
                  effect_timing=None,
@@ -1006,11 +1046,12 @@ class GlitchProcessor:
         self.monochrome, self.hue_shift, self.vignette = monochrome, hue_shift, vignette
         self.beat_sync, self.coherence, self.sensitivity = beat_sync, coherence, sensitivity
         self.export_mode = export_mode
-        self.beat_step = max(1, int(beat_step))
+        self.beat_step = int(beat_step)
         self.beat_variation = np.clip(float(beat_variation), 0, 1)
         self.render_limit = float(render_limit) if render_limit else None
         self.source_variety = np.clip(float(source_variety), 0, 1)
         self.music_match = np.clip(float(music_match), 0, 1)
+        self.backoff = np.clip(float(backoff), 0, 1)
         self.color_reference_idx = color_reference_idx if color_reference_idx is not None else None
         self.color_match_strength = np.clip(float(color_match_strength), 0, 1)
         self.lut_path = lut_path
@@ -1056,6 +1097,9 @@ class GlitchProcessor:
         self.current_vid_idx = 0
         self.recent_matches = {idx: deque(maxlen=8) for idx in range(len(self.inputs))}
         self.source_lock_penalties = [0.0 for _ in self.inputs]
+        self.source_backoff_penalties = [0.0 for _ in self.inputs]
+        self.source_backoff_holdoffs = [0 for _ in self.inputs]
+        self.source_variety_holdoffs = [0 for _ in self.inputs]
 
     def log(self, msg):
         if self.log_callback: self.log_callback(msg)
@@ -1301,6 +1345,14 @@ class GlitchProcessor:
                          target_activity=None, frame_count=1, activity_scale=1.0):
         if not candidates:
             return None
+        if self.backoff > 0 and getattr(self, "source_backoff_holdoffs", None):
+            unblocked = [cand for cand in candidates if self.source_backoff_holdoffs[cand[0]] <= 0]
+            if unblocked:
+                candidates = unblocked
+        if self.source_variety > 0 and getattr(self, "source_variety_holdoffs", None):
+            unblocked = [cand for cand in candidates if self.source_variety_holdoffs[cand[0]] <= 0]
+            if unblocked:
+                candidates = unblocked
         diversity_strength = self.source_variety if self.source_variety > 0 else (0.35 if len(self.inputs) == 1 else 0.0)
         use_variety = bool(source_use_counts) and diversity_strength > 0
         use_activity = (
@@ -1309,21 +1361,24 @@ class GlitchProcessor:
             and self.music_match > 0
             and activity_scale > 0
         )
-        if not use_variety and not use_activity:
-            choice = random.choice(candidates)
-            if self.debug_match_logging:
-                self.log(
-                    f"  Debug pick: {os.path.basename(self.inputs[choice[0]])} frame {choice[1]} "
-                    f"(uniform among {len(candidates)} candidates)"
-                )
-            return choice
+        has_history = any(self.recent_matches.get(v_idx) for v_idx, _ in candidates)
+        has_penalties = any(
+            (v_idx < len(self.source_lock_penalties) and self.source_lock_penalties[v_idx] > 0)
+            or (v_idx < len(self.source_backoff_penalties) and self.source_backoff_penalties[v_idx] > 0)
+            for v_idx, _ in candidates
+        )
+        if not use_variety and not use_activity and not has_history and not has_penalties:
+            return random.choice(candidates)
         max_count = max(source_use_counts) if source_use_counts else 0
         weights = []
         for v_idx, f_idx in candidates:
             weight = 1.0
             lock_penalty = self.source_lock_penalties[v_idx] if v_idx < len(self.source_lock_penalties) else 0.0
+            backoff_penalty = self.source_backoff_penalties[v_idx] if v_idx < len(self.source_backoff_penalties) else 0.0
             if lock_penalty > 0:
                 weight *= 1.0 / (1.0 + lock_penalty)
+            if backoff_penalty > 0 and self.backoff > 0:
+                weight *= 1.0 / (1.0 + (backoff_penalty * (1.0 + (self.backoff * 3.0))))
             history = self.recent_matches.get(v_idx)
             if history:
                 nearest = min(abs(f_idx - prev) for prev in history)
@@ -1365,6 +1420,24 @@ class GlitchProcessor:
             if penalty > 0:
                 self.source_lock_penalties[idx] = max(0.0, penalty * SOURCE_LOCK_PENALTY_DECAY)
 
+    def decay_source_backoff_penalties(self):
+        if not self.source_backoff_penalties:
+            return
+        for idx, penalty in enumerate(self.source_backoff_penalties):
+            if penalty > 0:
+                self.source_backoff_penalties[idx] = max(0.0, penalty * SOURCE_BACKOFF_PENALTY_DECAY)
+        if getattr(self, "source_backoff_holdoffs", None):
+            for idx, holdoff in enumerate(self.source_backoff_holdoffs):
+                if holdoff > 0:
+                    self.source_backoff_holdoffs[idx] = max(0, holdoff - 1)
+
+    def decay_source_variety_holdoffs(self):
+        if not getattr(self, "source_variety_holdoffs", None):
+            return
+        for idx, holdoff in enumerate(self.source_variety_holdoffs):
+            if holdoff > 0:
+                self.source_variety_holdoffs[idx] = max(0, holdoff - 1)
+
     def penalize_source_lock(self, source_idx, source_streak, alternate_count=0, current_count=0):
         if source_idx is None or not (0 <= source_idx < len(self.source_lock_penalties)):
             return
@@ -1378,6 +1451,29 @@ class GlitchProcessor:
             (SOURCE_LOCK_PENALTY_START + max(0, source_streak - SOURCE_LOCK_TRIGGER_STREAK) * 0.75) * penalty_scale,
         )
         self.source_lock_penalties[source_idx] = max(self.source_lock_penalties[source_idx], penalty)
+
+    def penalize_source_backoff(self, source_idx, source_streak=1):
+        if self.backoff <= 0:
+            return
+        if source_idx is None or not (0 <= source_idx < len(self.source_backoff_penalties)):
+            return
+        streak_factor = 1.0 + max(0, source_streak - 1) * (0.20 + (0.55 * self.backoff))
+        holdoff = int(round(1 + (self.backoff * 9) + max(0, source_streak - 1) * (1 + (self.backoff * 3))))
+        penalty = min(
+            SOURCE_BACKOFF_PENALTY_MAX,
+            (1.5 + (8.5 * self.backoff)) * streak_factor,
+        )
+        self.source_backoff_penalties[source_idx] = max(self.source_backoff_penalties[source_idx], penalty)
+        if getattr(self, "source_backoff_holdoffs", None):
+            self.source_backoff_holdoffs[source_idx] = max(self.source_backoff_holdoffs[source_idx], holdoff)
+
+    def penalize_source_variety(self, source_idx, source_streak=1):
+        if self.source_variety <= 0:
+            return
+        if source_idx is None or not (0 <= source_idx < len(self.source_variety_holdoffs)):
+            return
+        holdoff = int(round(1 + (self.source_variety * 6.0) + max(0, source_streak - 1) * (0.5 + (self.source_variety * 2.0))))
+        self.source_variety_holdoffs[source_idx] = max(self.source_variety_holdoffs[source_idx], holdoff)
 
     def motion_scale(self, motion_db):
         scores = []
@@ -1396,18 +1492,41 @@ class GlitchProcessor:
 
     def select_beat_cut_times(self, beats, sr):
         beat_times = librosa.frames_to_time(beats, sr=sr)
-        if self.beat_step <= 1 and self.beat_variation <= 0:
+        beat_step = max(1, int(self.beat_step))
+        if beat_step <= 1 and self.beat_variation <= 0:
             return beat_times
 
-        selected = []
-        for idx, beat_time in enumerate(beat_times):
-            is_main_cut = idx % self.beat_step == 0
-            is_variation_cut = random.random() < self.beat_variation
-            if is_main_cut or is_variation_cut:
-                selected.append(beat_time)
+        min_clip_beats = max(2, int(round(beat_step * 0.5))) if beat_step > 1 else 1
+        selected_indices = {0}
+        for interval_start in range(0, len(beat_times), beat_step):
+            interval_end = min(interval_start + beat_step, len(beat_times) - 1)
+            selected_indices.add(interval_end)
+            if self.beat_variation <= 0:
+                continue
+            if interval_end - interval_start < (min_clip_beats * 2):
+                continue
+            if random.random() >= self.beat_variation:
+                continue
+            low = interval_start + min_clip_beats
+            high = interval_end - min_clip_beats
+            if high < low:
+                continue
+            # Higher variation can add more than one beat-aligned cut, while
+            # retaining a minimum spacing so the timeline does not bunch up.
+            extra_count = 1 + int(self.beat_variation >= 0.5)
+            available = list(range(low, high + 1))
+            random.shuffle(available)
+            added = []
+            for candidate in available:
+                if all(abs(candidate - existing) >= min_clip_beats for existing in added):
+                    added.append(candidate)
+                    if len(added) >= extra_count:
+                        break
+            selected_indices.update(added)
 
+        selected = beat_times[sorted(selected_indices)]
         if len(selected) < 2 and len(beat_times) >= 2:
-            selected = [beat_times[0], beat_times[-1]]
+            selected = np.array([beat_times[0], beat_times[-1]])
         return np.array(selected)
 
     def analyze_video_file(self, path, emit_log=True, emit_frame_callback=True):
@@ -1542,9 +1661,19 @@ class GlitchProcessor:
                 for video_idx, path in enumerate(self.inputs)
             }
             completed = 0
+            analyses = [None] * len(self.inputs)
             for future in as_completed(futures):
                 video_idx = futures[future]
-                video_analysis, messages = future.result()
+                analyses[video_idx] = future.result()
+                completed += 1
+                if self.progress_callback:
+                    self.progress_callback(completed, len(self.inputs))
+
+            # Assemble shared candidate databases in input order. Worker
+            # completion order depends on file length and machine load and
+            # otherwise changes seeded random selection between identical runs.
+            for video_idx, result in enumerate(analyses):
+                video_analysis, messages = result
                 for msg in messages:
                     self.log(msg)
                 buckets = video_analysis["buckets"]
@@ -1566,9 +1695,6 @@ class GlitchProcessor:
                 color_stats[video_idx] = video_analysis.get("color_stats")
                 for brightness, frames in enumerate(buckets):
                     frame_db[brightness].extend((video_idx, frame_idx) for frame_idx in frames)
-                completed += 1
-                if self.progress_callback:
-                    self.progress_callback(completed, len(self.inputs))
         return frame_db, brightness_db, motion_db, activity_db, color_stats
 
     def analyze_audio_file(self):
@@ -1633,19 +1759,42 @@ class GlitchProcessor:
     def find_best_match(self, target_b, frame_db, current_vid_idx, source_use_counts=None,
                         activity_db=None, target_activity=None, frame_count=1, activity_scale=1.0,
                         source_streak=0):
+        def collect_candidates(search_range):
+            current, other, primary = [], [], []
+            for b in range(max(0, target_b - search_range), min(255, target_b + search_range) + 1):
+                for v_idx, f_idx in frame_db[b]:
+                    if self.use_primary_video() and v_idx == self.primary_video_idx:
+                        primary.append((v_idx, f_idx))
+                    if v_idx == current_vid_idx:
+                        current.append((v_idx, f_idx))
+                    else:
+                        other.append((v_idx, f_idx))
+            return current, other, primary
+
         search_range = 8
-        candidates_current, candidates_other, candidates_primary = [], [], []
-        for b in range(max(0, target_b - search_range), min(255, target_b + search_range) + 1):
-            for v_idx, f_idx in frame_db[b]:
-                if self.use_primary_video() and v_idx == self.primary_video_idx:
-                    candidates_primary.append((v_idx, f_idx))
-                if v_idx == current_vid_idx: candidates_current.append((v_idx, f_idx))
-                else: candidates_other.append((v_idx, f_idx))
+        candidates_current, candidates_other, candidates_primary = collect_candidates(search_range)
+        if (self.source_variety > 0 or self.music_match > 0) and source_use_counts:
+            current_sources = {v_idx for v_idx, _ in candidates_other}
+            desired_sources = min(len(self.inputs), max(3, int(round(3 + (self.source_variety * 3)))))
+            if len(current_sources) < desired_sources:
+                for wide_range in (12, 16, 24, 32, 48):
+                    wide_current, wide_other, wide_primary = collect_candidates(wide_range)
+                    wide_sources = {v_idx for v_idx, _ in wide_other}
+                    if len(wide_sources) > len(current_sources):
+                        candidates_current, candidates_other, candidates_primary = wide_current, wide_other, wide_primary
+                        current_sources = wide_sources
+                    if len(current_sources) >= desired_sources:
+                        break
         if self.debug_match_logging:
             current_lock_penalty = (
                 self.source_lock_penalties[current_vid_idx]
                 if 0 <= current_vid_idx < len(self.source_lock_penalties)
                 else 0.0
+            )
+            current_backoff_holdoff = (
+                self.source_backoff_holdoffs[current_vid_idx]
+                if 0 <= current_vid_idx < len(self.source_backoff_holdoffs)
+                else 0
             )
             alternate_lock_penalty = max(
                 [self.source_lock_penalties[v_idx] for v_idx, _ in candidates_other]
@@ -1654,10 +1803,50 @@ class GlitchProcessor:
             self.log(
                 f"  Debug pool: target_b={target_b} current={len(candidates_current)} other={len(candidates_other)} "
                 f"primary={len(candidates_primary)} streak={source_streak} "
-                f"lock={current_lock_penalty:.2f} alt_lock={alternate_lock_penalty:.2f}"
+                f"lock={current_lock_penalty:.2f} alt_lock={alternate_lock_penalty:.2f} backoff={current_backoff_holdoff}"
             )
         if candidates_primary and random.random() < self.primary_focus:
             return self.choose_candidate(candidates_primary, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
+        current_backoff_holdoff = (
+            self.source_backoff_holdoffs[current_vid_idx]
+            if 0 <= current_vid_idx < len(self.source_backoff_holdoffs)
+            else 0
+        )
+        if current_backoff_holdoff > 0 and candidates_other:
+            alternate = self.choose_candidate(candidates_other, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
+            if alternate:
+                if self.debug_match_logging:
+                    self.log(
+                        f"  Debug backoff: held off source {os.path.basename(self.inputs[current_vid_idx])} "
+                        f"for {current_backoff_holdoff} more segment(s); forcing alternate."
+                    )
+                return alternate
+        if current_backoff_holdoff > 0 and not candidates_other:
+            for wide_range in (12, 16, 24, 32, 48):
+                wide_current, wide_other, wide_primary = collect_candidates(wide_range)
+                if wide_other:
+                    if self.debug_match_logging:
+                        self.log(
+                            f"  Debug backoff widen: no alternate in +/-{search_range} buckets; "
+                            f"found {len(wide_other)} alternate candidate(s) within +/-{wide_range}."
+                        )
+                    return self.choose_candidate(wide_other, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
+                if wide_primary and random.random() < self.primary_focus:
+                    return self.choose_candidate(wide_primary, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
+        current_variety_holdoff = (
+            self.source_variety_holdoffs[current_vid_idx]
+            if 0 <= current_vid_idx < len(self.source_variety_holdoffs)
+            else 0
+        )
+        if current_variety_holdoff > 0 and candidates_other:
+            alternate = self.choose_candidate(candidates_other, source_use_counts, activity_db, target_activity, frame_count, activity_scale)
+            if alternate:
+                if self.debug_match_logging:
+                    self.log(
+                        f"  Debug variety: held off source {os.path.basename(self.inputs[current_vid_idx])} "
+                        f"for {current_variety_holdoff} more segment(s); forcing alternate."
+                    )
+                return alternate
         if source_streak >= SOURCE_LOCK_TRIGGER_STREAK and candidates_other:
             self.penalize_source_lock(current_vid_idx, source_streak, len(candidates_other), len(candidates_current))
             self.log(
@@ -1759,9 +1948,9 @@ class GlitchProcessor:
         package_dir = None
         clip_dir = None
         memory_state = memory_pressure_report()
-        temp_root = self.temp_root or select_temp_root_for_render(memory_state["pressure"])
-        if memory_state["pressure"] and temp_root in ("/dev/shm", "/run/shm"):
-            temp_root = tempfile.gettempdir()
+        temp_root = normalize_temp_storage_root(self.temp_root)
+        if temp_root is None:
+            temp_root = select_temp_root_for_render(memory_state["pressure"])
         self.temp_root = temp_root
         seed = self.initialize_rng()
         self.log(f"  Render seed: {seed}")
@@ -1774,10 +1963,6 @@ class GlitchProcessor:
             )
         if memory_state["pressure"]:
             self.log(f"  Memory pressure detected: {', '.join(memory_state['reasons'])}")
-        if temp_root in ("/dev/shm", "/run/shm"):
-            self.log(f"  Temporary storage: RAM-backed ({temp_root})")
-        else:
-            self.log(f"  Temporary storage: disk-backed ({temp_root})")
         self.log("  Starting source indexing and audio analysis in parallel...")
         with ThreadPoolExecutor(max_workers=2) as executor:
             source_future = executor.submit(self.analyze_source_videos)
@@ -1877,6 +2062,9 @@ class GlitchProcessor:
             for idx, history in self.recent_matches.items()
         }
         saved_source_lock_penalties = list(self.source_lock_penalties)
+        saved_source_backoff_penalties = list(self.source_backoff_penalties)
+        saved_source_backoff_holdoffs = list(self.source_backoff_holdoffs)
+        saved_source_variety_holdoffs = list(self.source_variety_holdoffs)
         planned_segments = []
         match_quality_total = 0.0
         match_brightness_total = 0.0
@@ -1895,6 +2083,8 @@ class GlitchProcessor:
                 target_brightness_norm = profile["target_brightness_norm"]
                 target_activity = profile["target_activity"]
                 self.decay_source_lock_penalties()
+                self.decay_source_backoff_penalties()
+                self.decay_source_variety_holdoffs()
                 match = self.find_best_match(
                     target_brightness,
                     frame_db,
@@ -1912,6 +2102,8 @@ class GlitchProcessor:
                 planning_vid_idx, start_frame = match
                 planning_source_streak = planning_source_streak + 1 if planning_vid_idx == previous_vid_idx else 1
                 self.record_match(planning_vid_idx, start_frame)
+                self.penalize_source_backoff(planning_vid_idx, planning_source_streak)
+                self.penalize_source_variety(planning_vid_idx, planning_source_streak)
                 planning_source_use_counts[planning_vid_idx] += 1
                 selected_brightness = self.segment_motion_score(brightness_db, planning_vid_idx, start_frame, num_frames)
                 selected_activity = self.segment_motion_score(activity_db, planning_vid_idx, start_frame, num_frames)
@@ -1943,6 +2135,9 @@ class GlitchProcessor:
             self.current_vid_idx = saved_current_vid_idx
             self.recent_matches = saved_recent_matches
             self.source_lock_penalties = saved_source_lock_penalties
+            self.source_backoff_penalties = saved_source_backoff_penalties
+            self.source_backoff_holdoffs = saved_source_backoff_holdoffs
+            self.source_variety_holdoffs = saved_source_variety_holdoffs
 
         self.log(f"  Planned {len(planned_segments)} segment(s); preparing output assembly...")
         transition_boundaries = []
@@ -1978,19 +2173,35 @@ class GlitchProcessor:
         else:
             width, height = source_width, source_height
         self.log(f"  Output resolution: {width}x{height}")
+        estimated_package_frames = sum(plan["num_frames"] for plan in planned_segments)
+        estimated_package_bytes = int(width * height * max(1, estimated_package_frames) * 1.25)
+        temp_root = normalize_temp_storage_root(self.temp_root) or select_temp_root_for_render(memory_state["pressure"])
+        temp_root = select_package_root_for_render(estimated_package_bytes, preferred_root=temp_root)
+        self.temp_root = temp_root
+        package_root = temp_root
+        if package_root in ("/dev/shm", "/run/shm"):
+            self.log(
+                f"  Package storage: RAM-backed ({package_root}); "
+                f"estimated export intermediates {human_bytes(estimated_package_bytes)}"
+            )
+        else:
+            self.log(
+                f"  Package storage: disk-backed ({package_root}); "
+                f"estimated export intermediates {human_bytes(estimated_package_bytes)}"
+            )
+        # Segment files are the render intermediates for every export mode.  A
+        # second full-length writer here used to duplicate the encoded video
+        # and keep an unnecessary ffmpeg process alive during rendering.
         temp_video = None
-        out = None
         segment_dir = None
-        if self.export_mode == EXPORT_FINAL_VIDEO:
-            temp_fd, temp_video = tempfile.mkstemp(suffix=".mp4", prefix="glitchsync_render_", dir=temp_root)
-            os.close(temp_fd)
-            out = LosslessVideoWriter(temp_video, width, height, self.fps)
-        caps, prev_f = [cv2.VideoCapture(f) for f in self.inputs], None
+        active_cap = None
+        active_cap_idx = None
+        prev_f = None
         reference_stats = color_stats.get(self.color_reference_idx) if self.color_reference_idx is not None else None
         segments = []
         rendered_frames = 0
         if self.export_mode in (EXPORT_FINAL_VIDEO, EXPORT_CUT_AWARE_MLT, EXPORT_CLIP_MLT):
-            package_dir = tempfile.mkdtemp(prefix="glitchsync_shotcut_", dir=temp_root)
+            package_dir = tempfile.mkdtemp(prefix="glitchsync_shotcut_", dir=package_root)
             if self.export_mode == EXPORT_CLIP_MLT:
                 clip_dir = os.path.join(package_dir, "media", "clips")
                 os.makedirs(clip_dir, exist_ok=True)
@@ -2030,21 +2241,41 @@ class GlitchProcessor:
             current_vid_idx = plan["video_idx"]
             start_frame = plan["start_frame"]
             self.current_vid_idx = current_vid_idx
-            ai_segment_probability = self.ai_segment_probability(clip_rms)
-            if self.debug_match_logging:
+            ai_active = self.ai_stylization_active()
+            ai_segment_probability = self.ai_segment_probability(clip_rms) if ai_active else 0.0
+            if self.debug_match_logging and ai_active:
                 self.log(
                     f"  Debug AI: segment {i + 1}/{len(planned_segments)} clip_rms={clip_rms:.2f} "
                     f"prob={ai_segment_probability:.2f}"
                 )
-            caps[current_vid_idx].set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-            chunk = []
-            for _ in range(num_frames):
-                r, f = caps[current_vid_idx].read()
-                if r:
-                    chunk.append(f)
             rewind_amount = self.effect_amount("rewind")
-            if self.rewind and clip_rms > 0.75 and random.random() < min(1.0, rewind_amount):
-                chunk = chunk[::-1]
+            reverse_segment = self.rewind and clip_rms > 0.75 and random.random() < min(1.0, rewind_amount)
+            if active_cap_idx != current_vid_idx:
+                if active_cap is not None:
+                    active_cap.release()
+                active_cap = cv2.VideoCapture(self.inputs[current_vid_idx])
+                active_cap_idx = current_vid_idx
+            active_cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+            # Normal playback is streamed directly from OpenCV. Reverse
+            # playback is uncommon and necessarily uses a temporary bounded
+            # frame buffer so the effect can run backwards.
+            reverse_store = None
+            reverse_offsets = []
+            reverse_shape = None
+            if reverse_segment:
+                reverse_store = tempfile.SpooledTemporaryFile(max_size=32 * 1024 * 1024, mode="w+b")
+                for _ in range(num_frames):
+                    r, frame = active_cap.read()
+                    if r:
+                        if reverse_shape is None:
+                            reverse_shape = frame.shape
+                        raw = frame.astype(np.uint8, copy=False).tobytes()
+                        reverse_offsets.append(reverse_store.tell())
+                        reverse_store.write(len(raw).to_bytes(8, "little"))
+                        reverse_store.write(raw)
+                frame_total = len(reverse_offsets)
+            else:
+                frame_total = num_frames
 
             if self.verbose_match_logging:
                 self.log(
@@ -2077,12 +2308,12 @@ class GlitchProcessor:
             monochrome_frame_timing = self.resolve_effect_frame_timing("monochrome")
             hue_shift_frame_timing = self.resolve_effect_frame_timing("hue_shift")
             vignette_frame_timing = self.resolve_effect_frame_timing("vignette")
-            motion_score = self.segment_motion_score(motion_db, self.current_vid_idx, start_frame, len(chunk))
+            motion_score = self.segment_motion_score(motion_db, self.current_vid_idx, start_frame, frame_total)
             use_static_pan_zoom = (
                 self.static_pan_zoom
                 and static_pan_zoom_amount > 0
                 and motion_score <= STATIC_MOTION_THRESHOLD
-                and len(chunk) > 1
+                and frame_total > 1
             )
             transform_overscan = 1.0
             if use_static_pan_zoom:
@@ -2094,10 +2325,7 @@ class GlitchProcessor:
             flash_decay_frames = max(3, int(self.fps * 0.12))
             flash_decay_until = -1
             flash_peak = 0.0
-            ai_segment_active = (
-                self.ai_stylization_active()
-                and random.random() < ai_segment_probability
-            )
+            ai_segment_active = ai_active and random.random() < ai_segment_probability
             ai_anchor = None
             ai_anchor_frame_idx = -1
             segment_writer = None
@@ -2109,9 +2337,22 @@ class GlitchProcessor:
                 clip_name = f"clip_{len(segments) + 1:04d}.mp4"
                 segment_path = os.path.join(clip_dir, clip_name)
                 segment_writer = LosslessVideoWriter(segment_path, width, height, self.fps)
-            for frame_idx, f in enumerate(chunk):
+            first_rendered_frame = None
+            rendered_in_segment = 0
+            for frame_idx in range(frame_total):
                 if self.stop_requested:
                     break
+                if reverse_segment:
+                    reverse_store.seek(reverse_offsets[-(frame_idx + 1)])
+                    raw_size = int.from_bytes(reverse_store.read(8), "little")
+                    f = np.frombuffer(reverse_store.read(raw_size), dtype=np.uint8).reshape(reverse_shape).copy()
+                else:
+                    ok, f = active_cap.read()
+                    if not ok:
+                        break
+                if first_rendered_frame is None:
+                    first_rendered_frame = f.copy()
+                rendered_in_segment += 1
                 frame_time = t_start + (frame_idx / self.fps)
                 frame_rms = norm_val(rms_energy, max_rms, frame_time)
                 frame_bass = norm_val(bass_energy, max_bass, frame_time)
@@ -2130,7 +2371,7 @@ class GlitchProcessor:
                 f = fit_frame_to_output(f, width, height)
                 f = apply_center_zoom(f, transform_overscan)
                 if use_static_pan_zoom:
-                    progress = frame_idx / max(1, len(chunk) - 1)
+                    progress = frame_idx / max(1, frame_total - 1)
                     f = apply_static_pan_zoom(f, progress, static_pan_zoom_amount, pan_x, pan_y)
                 if reference_stats and self.color_match_strength > 0:
                     f = match_lab_color(f, color_stats.get(self.current_vid_idx), reference_stats, self.color_match_strength)
@@ -2180,7 +2421,7 @@ class GlitchProcessor:
                             ai_anchor, ai_ok = self.ai_render_frame(f)
                             if ai_ok:
                                 ai_anchor_frame_idx = frame_idx
-                                self.log(f"  AI frame refreshed at segment {i + 1}/{len(planned_segments)} frame {frame_idx + 1}/{len(chunk)}")
+                                self.log(f"  AI frame refreshed at segment {i + 1}/{len(planned_segments)} frame {frame_idx + 1}/{frame_total}")
                             else:
                                 ai_anchor = None
                     if ai_anchor is not None and self.ai_blend > 0:
@@ -2197,17 +2438,6 @@ class GlitchProcessor:
                 if self.force_bw:
                     f = force_black_and_white(f)
                 segment_frame = f
-                if out is not None:
-                    transition_alpha = 1.0
-                    if transition_in and transition_in["frames"] > 0 and frame_idx < transition_in["frames"]:
-                        if transition_in["frames"] > 1:
-                            transition_alpha = min(transition_alpha, frame_idx / (transition_in["frames"] - 1))
-                    if transition_out and transition_out["frames"] > 0 and frame_idx >= (len(chunk) - transition_out["frames"]):
-                        if transition_out["frames"] > 0:
-                            transition_alpha = min(transition_alpha, (len(chunk) - frame_idx - 1) / transition_out["frames"])
-                    if transition_alpha < 1.0:
-                        f = cv2.convertScaleAbs(f, alpha=max(0.0, transition_alpha), beta=0)
-                    out.write(f)
                 if segment_writer is not None:
                     segment_writer.write(segment_frame)
                 prev_f = f.copy()
@@ -2215,8 +2445,8 @@ class GlitchProcessor:
             if segment_writer is not None:
                 segment_writer.release()
 
-            if chunk and not self.stop_requested:
-                frame_count = len(chunk)
+            if rendered_in_segment and not self.stop_requested:
+                frame_count = rendered_in_segment
                 segment = {
                     "timeline_in": rendered_frames,
                     "timeline_out": rendered_frames + frame_count - 1,
@@ -2239,15 +2469,16 @@ class GlitchProcessor:
                 segments.append(segment)
                 rendered_frames += frame_count
 
-            if self.frame_callback and chunk:
-                self.frame_callback(chunk[0])
+            if self.frame_callback and first_rendered_frame is not None:
+                self.frame_callback(first_rendered_frame)
+            if reverse_store is not None:
+                reverse_store.close()
 
             if self.progress_callback:
                 self.progress_callback(i, len(planned_segments))
             
-        for c in caps: c.release()
-        if out is not None:
-            out.release()
+        if active_cap is not None:
+            active_cap.release()
         if not self.stop_requested:
             self.log("Exporting final stage...")
             if self.progress_callback: self.progress_callback(-1, -1)
@@ -2372,7 +2603,7 @@ class GlitchProcessor:
 
         if len(block_paths) == 1:
             temp_video = block_paths[0]
-        elif len(block_paths) == 2:
+        else:
             self.log("  Applying dissolve transitions between blocks...")
             xfade_inputs = []
             filter_parts = []
@@ -2415,9 +2646,6 @@ class GlitchProcessor:
             ], capture_output=True)
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.decode(errors="ignore") or "ffmpeg failed while assembling dissolve transitions")
-        else:
-            self.log("  Applying sequential dissolve transitions between blocks...")
-            temp_video = self._xfade_block_chain(block_paths, block_durations, blocks, work_dir, preset, crf)
 
         root, ext = os.path.splitext(self.output)
         final_temp = f"{root or self.output}.tmp_{random.randint(1000, 9999)}{ext or '.mp4'}"
@@ -2502,7 +2730,11 @@ class GlitchProcessor:
         output_zip = output_path_for_mode(self.output, self.export_mode)
         created_package_dir = package_dir is None
         if package_dir is None:
-            package_dir = tempfile.mkdtemp(prefix="glitchsync_shotcut_")
+            estimated_package_bytes = int(width * height * max(1, sum(segment["frame_count"] for segment in segments)) * 1.25)
+            package_dir = tempfile.mkdtemp(
+                prefix="glitchsync_shotcut_",
+                dir=select_package_root_for_render(estimated_package_bytes, preferred_root=getattr(self, "temp_root", None)),
+            )
         try:
             media_dir = os.path.join(package_dir, "media")
             os.makedirs(media_dir, exist_ok=True)
@@ -2587,11 +2819,15 @@ class GlitchGUI:
         self.ai_max_dim = tk.IntVar(value=AI_DEFAULT_MAX_DIM)
         self.ai_blend = tk.DoubleVar(value=AI_DEFAULT_BLEND)
         self.ai_blend_label = None
+        self.temp_storage_var = tk.StringVar(value=preferred_temp_root() or tempfile.gettempdir())
+        self.temp_storage_root = self.temp_storage_var.get()
         self.duration, self.fps, self.coherence, self.sensitivity = tk.DoubleVar(value=0.10), tk.IntVar(value=30), tk.DoubleVar(value=0.20), tk.DoubleVar(value=1.0)
         self.source_variety = tk.DoubleVar(value=0.0)
         self.source_variety_label = None
         self.music_match = tk.DoubleVar(value=0.35)
         self.music_match_label = None
+        self.backoff = tk.DoubleVar(value=0.0)
+        self.backoff_label = None
         self.scene_transition_mode = tk.StringVar(value="Auto")
         self.scene_transition_mode_label = None
         self.color_match_enabled = tk.BooleanVar(value=False)
@@ -2815,9 +3051,18 @@ class GlitchGUI:
         ttk.Spinbox(render_length_controls, from_=1, to=3600, textvariable=self.snippet_duration, width=7).pack(side=tk.LEFT, padx=(8, 0))
         ttk.Label(render_length_controls, text="sec").pack(side=tk.LEFT, padx=(4, 0))
         ttk.Label(io, text="Out:").grid(row=7, column=0)
-        ttk.Entry(io, textvariable=self.output).grid(row=7, column=1, sticky="ew")
-        output_name_mode = ttk.Checkbutton(io, text="Increment if exists", variable=self.increment_output_if_exists)
-        output_name_mode.grid(row=8, column=1, sticky="w")
+        output_controls = ttk.Frame(io); output_controls.grid(row=7, column=1, sticky="ew")
+        output_controls.columnconfigure(0, weight=1)
+        ttk.Entry(output_controls, textvariable=self.output).grid(row=0, column=0, sticky="ew")
+        output_name_mode = ttk.Checkbutton(output_controls, text="Increment if exists", variable=self.increment_output_if_exists)
+        output_name_mode.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(io, text="Temp storage:").grid(row=8, column=0)
+        temp_storage_controls = ttk.Frame(io); temp_storage_controls.grid(row=8, column=1, sticky="ew")
+        temp_storage_controls.columnconfigure(0, weight=1)
+        temp_storage_entry = ttk.Entry(temp_storage_controls, textvariable=self.temp_storage_var)
+        temp_storage_entry.grid(row=0, column=0, sticky="ew")
+        temp_storage_browse = ttk.Button(temp_storage_controls, text="...", command=self.pick_temp_storage_root, width=3)
+        temp_storage_browse.grid(row=0, column=1, padx=(5, 0))
         ttk.Checkbutton(io, text="Primary focus", variable=self.primary_enabled).grid(row=9, column=0, sticky="w")
         primary_controls = ttk.Frame(io); primary_controls.grid(row=9, column=1, sticky="w", pady=5)
         ttk.Button(primary_controls, text="Set Selected", command=self.set_primary_video).pack(side=tk.LEFT)
@@ -2827,28 +3072,33 @@ class GlitchGUI:
         primary_focus_controls.columnconfigure(0, weight=1)
         ttk.Scale(primary_focus_controls, from_=0.0, to=1.0, variable=self.primary_focus, command=lambda e: self.update_primary_focus_label()).grid(row=0, column=0, sticky="ew")
         self.primary_focus_label = ttk.Label(primary_focus_controls, text="0.75", width=5); self.primary_focus_label.grid(row=0, column=1, sticky="w", padx=(8, 0))
-        ttk.Checkbutton(io, text="Color match", variable=self.color_match_enabled).grid(row=11, column=0, sticky="w")
-        color_ref_controls = ttk.Frame(io); color_ref_controls.grid(row=11, column=1, sticky="w", pady=5)
+        color_match_row = ttk.Frame(io); color_match_row.grid(row=11, column=0, columnspan=3, sticky="ew")
+        color_match_row.columnconfigure(2, weight=1)
+        ttk.Checkbutton(color_match_row, text="Color match", variable=self.color_match_enabled).grid(row=0, column=0, sticky="w")
+        color_ref_controls = ttk.Frame(color_match_row); color_ref_controls.grid(row=0, column=1, sticky="w", padx=(14, 0))
         ttk.Button(color_ref_controls, text="Set Selected", command=self.set_color_reference_video).pack(side=tk.LEFT)
         ttk.Label(color_ref_controls, textvariable=self.color_reference_label).pack(side=tk.LEFT, padx=(8, 0))
-        ttk.Label(io, text="Ref match:").grid(row=12, column=0, sticky="w")
-        color_match_controls = ttk.Frame(io); color_match_controls.grid(row=12, column=1, sticky="ew")
+        force_bw_cb = ttk.Checkbutton(io, text="Force black & white", variable=self.force_bw)
+        force_bw_cb.grid(row=12, column=0, columnspan=3, sticky="w")
+        ttk.Label(io, text="Ref match:").grid(row=13, column=0, sticky="w")
+        color_match_controls = ttk.Frame(io); color_match_controls.grid(row=13, column=1, sticky="ew")
         color_match_controls.columnconfigure(0, weight=1)
         ttk.Scale(color_match_controls, from_=0.0, to=1.0, variable=self.color_match_strength, command=lambda e: self.update_color_match_strength_label()).grid(row=0, column=0, sticky="ew")
         self.color_match_strength_label = ttk.Label(color_match_controls, text="0.50", width=5); self.color_match_strength_label.grid(row=0, column=1, sticky="w", padx=(8, 0))
-        ttk.Label(io, text="LUT:").grid(row=13, column=0, sticky="w")
-        lut_controls = ttk.Frame(io); lut_controls.grid(row=13, column=1, sticky="ew", pady=5)
+        ttk.Label(io, text="LUT:").grid(row=14, column=0, sticky="w")
+        lut_controls = ttk.Frame(io); lut_controls.grid(row=14, column=1, sticky="ew", pady=5)
         lut_controls.columnconfigure(0, weight=1)
         ttk.Entry(lut_controls, textvariable=self.lut_path).grid(row=0, column=0, sticky="ew")
         ttk.Button(lut_controls, text="...", command=self.pick_lut, width=3).grid(row=0, column=1, padx=(5, 0))
         ttk.Button(lut_controls, text="Clear", command=self.clear_lut).grid(row=0, column=2, padx=(5, 0))
-        force_bw_cb = ttk.Checkbutton(io, text="Force black & white", variable=self.force_bw)
-        force_bw_cb.grid(row=14, column=0, columnspan=3, sticky="w")
         self.add_tooltip(render_seed_entry, "Leave blank for a fresh random seed. Enter a number to reproduce the same render later.")
         self.add_tooltip(seed_copy_button, "Copy the current seed to the clipboard.")
         self.add_tooltip(seed_randomize_button, "Fill the seed field with a new random value.")
         self.add_tooltip(use_last_seed_button, "Restore the seed from the most recent render in this session.")
         self.add_tooltip(export_mode_combo, "Full Timeline bakes GlitchSync effects and transitions into rendered segment clips for a multi-track Shotcut project. Source Clips keeps the project editable from original clips, but does not include the full rendered transition look.")
+        self.add_tooltip(temp_storage_entry, "Directory used for render intermediates and Shotcut package files. Leave blank to auto-select.")
+        self.add_tooltip(temp_storage_browse, "Choose a directory with enough free space for render intermediates.")
+        self.add_tooltip(color_match_row, "Enable color matching and choose a selected reference video.")
         self.add_tooltip(force_bw_cb, "Convert the final output to black and white after all other effects and color matching have been applied.")
         self.render_seed.trace_add("write", lambda *_: self.update_render_seed_status())
         self.update_render_seed_status()
@@ -2892,7 +3142,7 @@ class GlitchGUI:
         self.resource_temp_value.grid(row=3, column=2, sticky="e")
         self.resource_temp_type = ttk.Label(resource_f, text="")
         self.resource_temp_type.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
-        self.temp_storage_root = preferred_temp_root() or tempfile.gettempdir()
+        self.temp_storage_root = self.temp_storage_var.get()
         self.init_resource_monitor()
 
         set_f = ttk.LabelFrame(m, text="Parameters", padding="10"); set_f.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
@@ -2924,11 +3174,16 @@ class GlitchGUI:
         source_variety_scale = ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.source_variety, command=lambda e: self.update_source_variety_label())
         source_variety_scale.grid(row=5, column=1, sticky="ew")
         self.source_variety_label = ttk.Label(set_f, text="0.00"); self.source_variety_label.grid(row=5, column=2)
+        backoff_label = ttk.Label(set_f, text="Backoff:")
+        backoff_label.grid(row=6, column=0)
+        backoff_scale = ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.backoff, command=lambda e: self.update_backoff_label())
+        backoff_scale.grid(row=6, column=1, sticky="ew")
+        self.backoff_label = ttk.Label(set_f, text="0.00"); self.backoff_label.grid(row=6, column=2)
         music_match_label = ttk.Label(set_f, text="Music match:")
-        music_match_label.grid(row=6, column=0)
+        music_match_label.grid(row=7, column=0)
         music_match_scale = ttk.Scale(set_f, from_=0.0, to=1.0, variable=self.music_match, command=lambda e: self.update_music_match_label())
-        music_match_scale.grid(row=6, column=1, sticky="ew")
-        self.music_match_label = ttk.Label(set_f, text="0.35"); self.music_match_label.grid(row=6, column=2)
+        music_match_scale.grid(row=7, column=1, sticky="ew")
+        self.music_match_label = ttk.Label(set_f, text="0.35"); self.music_match_label.grid(row=7, column=2)
         sensitivity_label = ttk.Label(set_f, text="Sensitivity:")
         sensitivity_label.grid(row=8, column=0)
         sensitivity_scale = ttk.Scale(set_f, from_=0.1, to=3.0, variable=self.sensitivity, command=lambda e: self.l_sen.config(text=f"{self.sensitivity.get():.2f}"))
@@ -3031,6 +3286,8 @@ class GlitchGUI:
         self.add_tooltip(coherence_scale, "Higher values keep the same source video more often.")
         self.add_tooltip(source_variety_label, "Prefer sources that have been used less often.")
         self.add_tooltip(source_variety_scale, "Higher values spread selections across sources more aggressively.")
+        self.add_tooltip(backoff_label, "Temporarily discourage recently used sources so selection spreads out over the next few clips.")
+        self.add_tooltip(backoff_scale, "Higher values apply a stronger short-term penalty to the most recently selected source.")
         self.add_tooltip(music_match_label, "Bias frame selection toward source motion that matches the audio energy.")
         self.add_tooltip(music_match_scale, "Higher values make audio energy influence source choice more strongly.")
         self.add_tooltip(scene_transition_label, "Automatically choose hard cuts, quick fades, or longer dissolves from audio activity, or force one transition style.")
@@ -3155,6 +3412,9 @@ class GlitchGUI:
     def update_source_variety_label(self):
         if self.source_variety_label:
             self.source_variety_label.config(text=f"{self.source_variety.get():.2f}")
+    def update_backoff_label(self):
+        if self.backoff_label:
+            self.backoff_label.config(text=f"{self.backoff.get():.2f}")
     def update_music_match_label(self):
         if self.music_match_label:
             self.music_match_label.config(text=f"{self.music_match.get():.2f}")
@@ -3203,7 +3463,7 @@ class GlitchGUI:
             return
         bar.configure(style="ResourcePressure.TProgressbar" if pressure else "Resource.TProgressbar")
     def init_resource_monitor(self):
-        self.temp_storage_root = preferred_temp_root() or tempfile.gettempdir()
+        self.sync_temp_storage_root()
         if hasattr(psutil, "cpu_percent"):
             psutil.cpu_percent(None)
         self.root.after(2000, self.refresh_resource_monitor)
@@ -3241,7 +3501,8 @@ class GlitchGUI:
             gpu_pct = self.probe_gpu_usage()
             if gpu_pct is None:
                 gpu_pct = 0.0
-            temp_root = getattr(self, "temp_storage_root", tempfile.gettempdir())
+            temp_root = self.resolve_temp_storage_root()
+            self.temp_storage_root = temp_root
             temp_usage = shutil.disk_usage(temp_root)
             temp_pct = (temp_usage.used / temp_usage.total * 100.0) if temp_usage.total else 0.0
             temp_is_ram = temp_root in ("/dev/shm", "/run/shm")
@@ -3379,12 +3640,14 @@ class GlitchGUI:
             "snippet_duration": self.snippet_duration.get(),
             "coherence": self.coherence.get(),
             "sensitivity": self.sensitivity.get(),
+            "backoff": self.backoff.get(),
             "source_variety": self.source_variety.get(),
             "music_match": self.music_match.get(),
             "scene_transition_mode": self.scene_transition_mode.get(),
             "color_match_enabled": self.color_match_enabled.get(),
             "color_match_strength": self.color_match_strength.get(),
             "force_bw": self.force_bw.get(),
+            "temp_storage_root": self.temp_storage_var.get(),
             "lut_path": self.lut_path.get(),
             "beat_sync": self.beat_sync.get(),
             "beat_step": self.beat_step.get(),
@@ -3572,6 +3835,7 @@ class GlitchGUI:
         self.snippet_duration.set(settings.get("snippet_duration", self.snippet_duration.get()))
         self.coherence.set(settings.get("coherence", self.coherence.get()))
         self.sensitivity.set(settings.get("sensitivity", self.sensitivity.get()))
+        self.backoff.set(settings.get("backoff", 0.0))
         self.source_variety.set(settings.get("source_variety", self.source_variety.get()))
         self.music_match.set(settings.get("music_match", self.music_match.get()))
         scene_transition_mode = settings.get("scene_transition_mode", self.scene_transition_mode.get())
@@ -3579,11 +3843,12 @@ class GlitchGUI:
         self.color_match_enabled.set(settings.get("color_match_enabled", self.color_match_enabled.get()))
         self.color_match_strength.set(settings.get("color_match_strength", self.color_match_strength.get()))
         self.force_bw.set(settings.get("force_bw", self.force_bw.get()))
+        self.temp_storage_var.set(settings.get("temp_storage_root", self.temp_storage_var.get()) or tempfile.gettempdir())
         self.color_reference_idx = int(settings.get("color_reference_idx", self.color_reference_idx) or 0)
         self.update_color_reference_label(settings.get("color_reference_label", self.color_reference_label.get()))
         self.lut_path.set(settings.get("lut_path", self.lut_path.get()))
         self.beat_sync.set(settings.get("beat_sync", self.beat_sync.get()))
-        self.beat_step.set(settings.get("beat_step", self.beat_step.get()))
+        self.beat_step.set(int(settings.get("beat_step", self.beat_step.get()) or 4))
         self.beat_variation.set(settings.get("beat_variation", self.beat_variation.get()))
         effects_enabled = settings.get("effects_enabled", {})
         self.pixelate.set(effects_enabled.get("pixelate", self.pixelate.get()))
@@ -3609,6 +3874,7 @@ class GlitchGUI:
         self.l_dur.config(text=f"{self.duration.get():.2f}s")
         self.l_coh.config(text=f"{self.coherence.get():.2f}")
         self.l_sen.config(text=f"{self.sensitivity.get():.2f}")
+        self.update_backoff_label()
         self.update_beat_variation_label()
         self.update_source_variety_label()
         self.update_music_match_label()
@@ -3618,6 +3884,7 @@ class GlitchGUI:
         self.update_ai_blend_label()
         self.update_effect_amount_label("ai_dream_chance")
         self.update_primary_focus_label()
+        self.sync_temp_storage_root()
         self.toggle_experimental_mode()
     def save_named_style(self):
         name = self.style_name.get().strip()
@@ -3772,6 +4039,22 @@ class GlitchGUI:
             self.lut_path.set(path)
     def clear_lut(self):
         self.lut_path.set("")
+    def resolve_temp_storage_root(self, memory_pressure=False):
+        root = normalize_temp_storage_root(self.temp_storage_var.get())
+        if root:
+            return root
+        return select_temp_root_for_render(memory_pressure)
+    def sync_temp_storage_root(self, memory_pressure=False):
+        root = self.resolve_temp_storage_root(memory_pressure)
+        self.temp_storage_root = root
+        if self.temp_storage_var.get() != root:
+            self.temp_storage_var.set(root)
+        return root
+    def pick_temp_storage_root(self):
+        path = filedialog.askdirectory(initialdir=self.resolve_temp_storage_root())
+        if path:
+            self.temp_storage_var.set(path)
+            self.sync_temp_storage_root()
     def resolve_render_output(self, export_mode):
         base_output = self.output.get()
         resolved_output = output_path_for_mode(base_output, export_mode)
@@ -3821,7 +4104,7 @@ class GlitchGUI:
                 self.render_seed.set(str(seed))
             self.last_render_seed = seed
             memory_state = memory_pressure_report()
-            self.temp_storage_root = select_temp_root_for_render(memory_state["pressure"])
+            self.sync_temp_storage_root(memory_state["pressure"])
             p = GlitchProcessor(
                 self.inputs,
                 self.audio.get(),
@@ -3853,6 +4136,7 @@ class GlitchGUI:
                 render_limit,
                 self.source_variety.get(),
                 self.music_match.get(),
+                self.backoff.get(),
                 color_reference_idx,
                 color_match_strength,
                 self.lut_path.get().strip(),
@@ -3925,6 +4209,7 @@ class GlitchGUI:
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
+    p.add_argument("--version", action="version", version=f"GlitchSync {APP_VERSION}")
     p.add_argument("--inputs", nargs='+'); p.add_argument("--audio"); p.add_argument("--output", default="output.mp4"); p.add_argument("--beat_sync", action="store_true"); p.add_argument("--gui", action="store_true")
     p.add_argument("--export-mode", choices=[EXPORT_FINAL_VIDEO, EXPORT_CUT_AWARE_MLT, EXPORT_CLIP_MLT], default=EXPORT_FINAL_VIDEO)
     p.add_argument("--export-quality", choices=list(EXPORT_QUALITY_LABELS.keys()), default="High quality (slower)")
@@ -3932,6 +4217,7 @@ if __name__ == "__main__":
     p.add_argument("--beat-variation", type=float, default=0.0)
     p.add_argument("--render-limit", type=float)
     p.add_argument("--music-match", type=float, default=0.35)
+    p.add_argument("--backoff", type=float, default=0.0)
     p.add_argument("--force-bw", action="store_true")
     p.add_argument("--seed", type=int)
     args = p.parse_args()
@@ -3941,5 +4227,5 @@ if __name__ == "__main__":
         if args.seed is not None:
             random.seed(args.seed)
             np.random.seed(int(args.seed) % (2**32))
-        proc = GlitchProcessor(args.inputs, args.audio, args.output, beat_sync=args.beat_sync, export_mode=args.export_mode, progress_callback=lambda c, t: print(f"Progress: {c}/{t}", end='\r'), beat_step=args.beat_step, beat_variation=args.beat_variation, render_limit=args.render_limit, music_match=args.music_match, export_quality_label=args.export_quality, force_bw=args.force_bw, render_seed=args.seed)
+        proc = GlitchProcessor(args.inputs, args.audio, args.output, beat_sync=args.beat_sync, export_mode=args.export_mode, progress_callback=lambda c, t: print(f"Progress: {c}/{t}", end='\r'), beat_step=args.beat_step, beat_variation=args.beat_variation, render_limit=args.render_limit, music_match=args.music_match, backoff=args.backoff, export_quality_label=args.export_quality, force_bw=args.force_bw, render_seed=args.seed)
         proc.process()

@@ -2,6 +2,29 @@
 
 Audio-reactive video glitch tool that synchronizes video cuts and visual effects to the beats and frequency transients of a music track.
 
+Current version: **0.8.0**
+
+## Launching
+
+On Linux and macOS, run the included launcher:
+
+```bash
+./launch_glitchsync.sh
+```
+
+It creates a local `.venv`, installs the dependencies listed in `requirements.txt`, checks for updates on later launches, and opens the graphical interface. Pass `PYTHON_BIN=/path/to/python` when a different Python executable is required.
+
+To install dependencies manually:
+
+```bash
+python3 -m pip install -r requirements.txt
+python3 glitch_sync.py --gui
+```
+
+The launcher uses `opencv-python`; `cv2` is the Python import name for that package.
+
+The `--version` option prints the installed application version.
+
 ## Features
 - **Beat Synchronization**: Automatically detects BPM and aligns cuts to the rhythm.
 - **Audio-Reactive Effects**:
@@ -23,6 +46,7 @@ Audio-reactive video glitch tool that synchronizes video cuts and visual effects
 - **Aspect-Safe Source Fitting**: Source videos are dark-edge cropped, scaled to cover, center-cropped, and overscanned for movement effects instead of being stretched or exposing transform borders.
 - **Export Quality Presets**: Choose master quality, high quality, balanced, or fast preview encoding for final MP4 and cut-aware Shotcut exports.
 - **Source Variety**: Bias clip selection toward under-used input videos during a render.
+- **Source Backoff**: Temporarily discourage recently used sources so the next few cuts spread wider when needed.
 - **Music Match**: Bias clip selection so louder, bass-heavy, or high-energy sections prefer brighter and higher-motion source regions.
 - **Color Matching and LUTs**: Match clips toward a selected reference video's cached color profile with adjustable strength, or apply a user-supplied `.cube` LUT at full strength.
 - **Saved Styles**: Load starter styles and save/delete named settings presets. New sessions and new projects start from the built-in Default style.
@@ -45,7 +69,8 @@ Audio-reactive video glitch tool that synchronizes video cuts and visual effects
 
 Use `--export-mode final_video`, `--export-mode cut_aware_mlt`, or `--export-mode clip_mlt`.
 Use `--export-quality "Master quality (largest)"`, `--export-quality "High quality (slower)"`, `--export-quality Balanced`, or `--export-quality "Fast preview"` to choose the final encoding preset.
-Use `--beat-step 8 --beat-variation 0.2` with `--beat_sync` to make main cuts every 8 beats while allowing occasional extra cuts.
+Use `--beat-step 8 --beat-variation 0.2` with `--beat_sync` to make main cuts every 8 beats while allowing occasional extra cuts. Built-in styles keep beat intervals at 4 beats or higher, but the control remains user-editable.
+Use `--backoff 0.5` to more aggressively penalize the most recently used source for the next few clips.
 Use `--music-match 0.6` to bias source selection toward brighter and higher-motion clips during louder or more energetic audio sections.
 
 The Shotcut modes create a ZIP archive containing `glitchsync_project.mlt` and relative `media/` files.
