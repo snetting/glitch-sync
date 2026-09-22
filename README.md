@@ -4,6 +4,8 @@ Audio-reactive video glitch tool that synchronizes video cuts and visual effects
 
 Current version: **0.8.0**
 
+![GlitchSync Pro interface](docs/assets/GlitchSyncPro.png)
+
 ## Launching
 
 On Linux and macOS, run the included launcher:
